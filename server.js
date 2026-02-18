@@ -17,6 +17,7 @@ const PORT = process.env.PORT || 3000;
 // COLLEGE CONFIG
 // ==========================================
 const ALLOWED_EMAIL_DOMAIN = 'nitjsr.ac.in';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const crypto = require('crypto');
 
 function generateSessionCode() {
@@ -564,6 +565,7 @@ function getStudentFormHTML(session, errorMsg) {
   const isActive = session && session.active;
   const sessionName = isActive ? session.name : '';
   const sessionCode = isActive ? (session.code || '') : '';
+  const useGoogleSignIn = !!GOOGLE_CLIENT_ID;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -572,6 +574,7 @@ function getStudentFormHTML(session, errorMsg) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Attendance — NIT Jamshedpur</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  ${useGoogleSignIn ? '<script src="https://accounts.google.com/gsi/client" async defer></script>' : ''}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -606,24 +609,37 @@ function getStudentFormHTML(session, errorMsg) {
     }
     input:focus, select:focus { border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
     input::placeholder { color: #475569; }
+    input[readonly] { background: #1e293b; color: #22c55e; border-color: #22c55e40; cursor: default; }
 
-    /* Email account picker */
-    .email-display {
-      background: #0f172a; border: 2px solid #334155; border-radius: 14px;
-      padding: 14px 18px; display: flex; align-items: center; gap: 12px;
-      cursor: pointer; transition: border-color 0.3s;
+    /* Google account display */
+    .account-card {
+      display: flex; align-items: center; gap: 14px;
+      background: #0f172a; border: 2px solid #22c55e40; border-radius: 14px;
+      padding: 14px 18px; margin-bottom: 8px;
     }
-    .email-display:hover { border-color: #6366f1; }
-    .email-avatar {
-      width: 40px; height: 40px; border-radius: 50%;
+    .account-avatar {
+      width: 44px; height: 44px; border-radius: 50%;
       background: linear-gradient(135deg, #6366f1, #4f46e5);
       display: flex; align-items: center; justify-content: center;
-      font-size: 18px; font-weight: 700; color: white; flex-shrink: 0;
+      font-size: 20px; font-weight: 700; color: white; flex-shrink: 0;
     }
-    .email-info { flex: 1; }
-    .email-info .email-text { font-size: 15px; color: #f1f5f9; font-weight: 500; }
-    .email-info .email-hint { font-size: 12px; color: #64748b; margin-top: 2px; }
-    .switch-link { color: #818cf8; font-size: 13px; font-weight: 600; text-decoration: none; }
+    .account-info { flex: 1; }
+    .account-email { font-size: 15px; color: #22c55e; font-weight: 600; }
+    .account-name { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .account-badge { font-size: 10px; background: #052e16; color: #22c55e; padding: 2px 8px; border-radius: 6px; font-weight: 600; }
+
+    .change-link { display: block; text-align: right; color: #818cf8; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 6px; }
+
+    .google-btn-wrap { text-align: center; margin-bottom: 24px; }
+    .google-btn-custom {
+      display: inline-flex; align-items: center; gap: 12px;
+      padding: 14px 28px; border-radius: 14px;
+      background: white; color: #1f2937; font-size: 16px; font-weight: 600;
+      font-family: inherit; cursor: pointer; border: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2); transition: all 0.3s;
+    }
+    .google-btn-custom:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.3); transform: translateY(-1px); }
+    .google-btn-custom img { width: 22px; height: 22px; }
 
     .domain-note {
       font-size: 12px; color: #f59e0b; margin-top: 8px;
@@ -645,7 +661,11 @@ function getStudentFormHTML(session, errorMsg) {
     .success h2 { color: #22c55e; font-size: 22px; margin: 16px 0 6px; }
     .success p { color: #94a3b8; font-size: 15px; }
     #error { color: #f87171; text-align: center; margin-top: 14px; font-size: 14px; font-weight: 500; display: none; }
+    .step-indicator { text-align: center; color: #64748b; font-size: 13px; margin-bottom: 20px; }
+    .step-indicator strong { color: #6366f1; }
     @keyframes pop { 0% { transform: scale(0); } 60% { transform: scale(1.2); } 100% { transform: scale(1); } }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fadeIn 0.3s ease; }
   </style>
 </head>
 <body>
@@ -655,23 +675,58 @@ function getStudentFormHTML(session, errorMsg) {
       <h1>Mark Attendance</h1>
       <div class="session-badge">${escapeHtml(sessionName)}</div>
 
-      <div id="formDiv">
-        <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left;">
-
-          <!-- Email Field: Google-style account selector -->
-          <div class="field">
-            <label>College Email</label>
-            <div id="emailPickerArea">
-              <input type="email" id="email" required
-                placeholder="yourname@${ALLOWED_EMAIL_DOMAIN}"
-                autocomplete="email"
-                pattern="[a-zA-Z0-9._%+-]+@${ALLOWED_EMAIL_DOMAIN.replace(/\./g, '\\\\.')}"
-                title="Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed">
-              <div class="domain-note">
-                ⚠️ Only <strong>@${ALLOWED_EMAIL_DOMAIN}</strong> emails accepted
-              </div>
+      <!-- Step 1: Sign in with Google -->
+      <div id="step1">
+        <div class="step-indicator"><strong>Step 1</strong> — Verify your identity</div>
+        ${useGoogleSignIn ? `
+          <div class="google-btn-wrap">
+            <div id="g_id_onload"
+                 data-client_id="${GOOGLE_CLIENT_ID}"
+                 data-callback="handleGoogleResponse"
+                 data-auto_prompt="false">
+            </div>
+            <div class="g_id_signin"
+                 data-type="standard"
+                 data-size="large"
+                 data-theme="filled_blue"
+                 data-text="signin_with"
+                 data-shape="pill"
+                 data-width="300">
             </div>
           </div>
+          <div class="domain-note">
+            ⚠️ Select your <strong>@${ALLOWED_EMAIL_DOMAIN}</strong> account
+          </div>
+        ` : `
+          <div class="field" style="text-align:left;">
+            <label>College Email</label>
+            <input type="email" id="emailFallback" required
+              placeholder="yourname@${ALLOWED_EMAIL_DOMAIN}"
+              autocomplete="email">
+            <div class="domain-note">
+              ⚠️ Only <strong>@${ALLOWED_EMAIL_DOMAIN}</strong> emails accepted
+            </div>
+          </div>
+          <button type="button" class="btn" onclick="useFallbackEmail()" style="margin-bottom: 16px;">Continue →</button>
+        `}
+      </div>
+
+      <!-- Step 2: Confirm & submit (shown after sign-in) -->
+      <div id="step2" style="display:none;" class="fade-in">
+        <div class="step-indicator"><strong>Step 2</strong> — Confirm & submit</div>
+        
+        <div class="account-card">
+          <div class="account-avatar" id="avatarLetter">?</div>
+          <div class="account-info">
+            <div class="account-email" id="displayEmail">—</div>
+            <div class="account-name" id="displayName">—</div>
+          </div>
+          <div class="account-badge">✓ Verified</div>
+        </div>
+        <div class="change-link" onclick="changeAccount()">Change account</div>
+
+        <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left; margin-top: 16px;">
+          <input type="hidden" id="email" value="">
 
           <div class="field">
             <label>Full Name</label>
@@ -693,22 +748,91 @@ function getStudentFormHTML(session, errorMsg) {
       </div>
 
       <script>
+        var selectedEmail = '';
+        var selectedName = '';
+
+        // Google Sign-In callback
+        function handleGoogleResponse(response) {
+          try {
+            // Decode JWT payload
+            var parts = response.credential.split('.');
+            var payload = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
+            var email = payload.email.toLowerCase();
+            var name = payload.name || '';
+
+            // Check domain
+            if (!email.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
+              showError('Please select your @${ALLOWED_EMAIL_DOMAIN} account, not ' + email);
+              return;
+            }
+
+            setVerifiedEmail(email, name);
+          } catch(e) {
+            showError('Failed to verify Google account. Try again.');
+          }
+        }
+
+        // Fallback: manual email entry (when Google Client ID not set)
+        function useFallbackEmail() {
+          var emailInput = document.getElementById('emailFallback');
+          if (!emailInput) return;
+          var email = emailInput.value.trim().toLowerCase();
+          if (!email) { showError('Please enter your email.'); return; }
+          if (!email.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
+            showError('Only @${ALLOWED_EMAIL_DOMAIN} emails allowed.');
+            return;
+          }
+          setVerifiedEmail(email, '');
+        }
+
+        function setVerifiedEmail(email, name) {
+          selectedEmail = email;
+          selectedName = name;
+
+          // Update UI
+          document.getElementById('email').value = email;
+          document.getElementById('displayEmail').textContent = email;
+          document.getElementById('displayName').textContent = name || email.split('@')[0];
+          document.getElementById('avatarLetter').textContent = email[0].toUpperCase();
+          if (name) document.getElementById('fullname').value = name;
+
+          // Switch to step 2
+          document.getElementById('step1').style.display = 'none';
+          document.getElementById('step2').style.display = 'block';
+          hideError();
+        }
+
+        function changeAccount() {
+          selectedEmail = '';
+          selectedName = '';
+          document.getElementById('email').value = '';
+          document.getElementById('step1').style.display = 'block';
+          document.getElementById('step2').style.display = 'none';
+        }
+
+        function showError(msg) {
+          var errDiv = document.getElementById('error');
+          errDiv.textContent = msg;
+          errDiv.style.display = 'block';
+        }
+        function hideError() {
+          var errDiv = document.getElementById('error');
+          if (errDiv) errDiv.style.display = 'none';
+        }
+
         function submitForm(e) {
           e.preventDefault();
           var btn = document.getElementById('submitBtn');
-          var errDiv = document.getElementById('error');
           var emailVal = document.getElementById('email').value.trim().toLowerCase();
 
-          // Client-side domain check
-          if (!emailVal.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
-            errDiv.textContent = 'Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.';
-            errDiv.style.display = 'block';
+          if (!emailVal || !emailVal.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
+            showError('Invalid email. Please sign in again.');
             return false;
           }
 
           btn.disabled = true;
           btn.textContent = '⏳ Submitting...';
-          errDiv.style.display = 'none';
+          hideError();
 
           fetch('/submit', {
             method: 'POST',
@@ -722,21 +846,18 @@ function getStudentFormHTML(session, errorMsg) {
           .then(function(r) { return r.json(); })
           .then(function(data) {
             if (data.success) {
-              document.getElementById('formDiv').style.display = 'none';
+              document.getElementById('step2').style.display = 'none';
               document.getElementById('successMsg').style.display = 'block';
-              // Show parsed roll number
               var rollPart = emailVal.split('@')[0].toUpperCase();
               document.getElementById('rollDisplay').textContent = 'Roll: ' + rollPart;
             } else {
-              errDiv.textContent = data.error || 'Failed';
-              errDiv.style.display = 'block';
+              showError(data.error || 'Failed');
               btn.disabled = false;
               btn.textContent = '✅ Submit Attendance';
             }
           })
           .catch(function() {
-            errDiv.textContent = 'Network error. Try again.';
-            errDiv.style.display = 'block';
+            showError('Network error. Try again.');
             btn.disabled = false;
             btn.textContent = '✅ Submit Attendance';
           });
@@ -747,7 +868,7 @@ function getStudentFormHTML(session, errorMsg) {
       <div class="closed">
         <div style="font-size:56px;margin-bottom:16px;">⏳</div>
         <h1 style="color:#f1f5f9; margin-bottom:16px;">Attendance — NIT Jamshedpur</h1>
-        ${errorMsg ? `<p style="color:#f59e0b;font-size:16px;margin-bottom:12px;">${escapeHtml(errorMsg)}</p>` : ''}
+        ${errorMsg ? '<p style="color:#f59e0b;font-size:16px;margin-bottom:12px;">' + escapeHtml(errorMsg) + '</p>' : ''}
         No active session right now.<br>
         Wait for your teacher to start one.
       </div>
@@ -775,6 +896,8 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  ╠════════════════════════════════════════════╣');
   console.log(`  ║  Email Domain: @${ALLOWED_EMAIL_DOMAIN}      ║`);
   console.log('  ║  Data Retention: 2 days                   ║');
+  console.log(`  ║  Google Sign-In: ${GOOGLE_CLIENT_ID ? '✅ Enabled' : '❌ Not set'}        ║`);
   console.log('  ╚════════════════════════════════════════════╝');
   console.log('');
 });
+
