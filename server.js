@@ -443,16 +443,22 @@ app.get('/api/responses', (req, res) => {
     rows = activeSession ? db.attendance.filter(a => a.sessionId === activeSession.id) : [];
   }
 
+  // Sort by roll number ascending
+  rows.sort((a, b) => {
+    const ra = (a.rollNo || '').toString();
+    const rb = (b.rollNo || '').toString();
+    return ra.localeCompare(rb, undefined, { numeric: true });
+  });
+
   res.json({
     success: true,
-    responses: rows.map((r, i) => {
+    responses: rows.map(r => {
       const session = db.sessions.find(s => s.id === r.sessionId);
       return {
-        'S.No': i + 1,
+        'Roll No': r.rollNo || '-',
         'Name': r.name,
         'Reg No': r.regNo || r.rollNumber || '-',
         'Email': r.email,
-        'Roll No': r.rollNo || '-',
         'Year': r.year || '-',
         'Program': r.program || '-',
         'Branch': r.branch || '-',
@@ -462,7 +468,7 @@ app.get('/api/responses', (req, res) => {
       };
     }),
     count: rows.length,
-    headers: ['S.No', 'Name', 'Reg No', 'Email', 'Roll No', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'],
+    headers: ['Roll No', 'Name', 'Reg No', 'Email', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'],
   });
 });
 
@@ -519,14 +525,20 @@ app.get('/api/export-multi', (req, res) => {
     ? db.attendance.filter(a => sessionIds.includes(a.sessionId))
     : db.attendance;
 
-  const excelData = rows.map((r, i) => {
+  // Sort by roll number ascending
+  rows.sort((a, b) => {
+    const ra = (a.rollNo || '').toString();
+    const rb = (b.rollNo || '').toString();
+    return ra.localeCompare(rb, undefined, { numeric: true });
+  });
+
+  const excelData = rows.map(r => {
     const session = db.sessions.find(s => s.id === r.sessionId);
     return {
-      'S.No': i + 1,
+      'Roll No': r.rollNo || '-',
       'Name': r.name,
       'Reg No': r.regNo || r.rollNumber || '-',
       'Email': r.email,
-      'Roll No': r.rollNo || '-',
       'Year': r.year || '-',
       'Program': r.program || '-',
       'Branch': r.branch || '-',
@@ -536,14 +548,14 @@ app.get('/api/export-multi', (req, res) => {
     };
   });
 
-  const excelHeaders = ['S.No', 'Name', 'Reg No', 'Email', 'Roll No', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'];
+  const excelHeaders = ['Roll No', 'Name', 'Reg No', 'Email', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'];
   const wb = XLSX.utils.book_new();
   if (excelData.length === 0) {
     const ws = XLSX.utils.aoa_to_sheet([excelHeaders]);
     XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
   } else {
     const ws = XLSX.utils.json_to_sheet(excelData);
-    ws['!cols'] = [{ wch: 6 }, { wch: 25 }, { wch: 18 }, { wch: 30 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 }, { wch: 14 }, { wch: 10 }];
+    ws['!cols'] = [{ wch: 8 }, { wch: 25 }, { wch: 18 }, { wch: 30 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 }, { wch: 14 }, { wch: 10 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
   }
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -566,7 +578,7 @@ app.get('/api/export', (req, res) => {
     rows = db.attendance;
   }
 
-  const excelHeaders = ['S.No', 'Name', 'Reg No', 'Email', 'Roll No', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'];
+  const excelHeaders = ['Roll No', 'Name', 'Reg No', 'Email', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'];
 
   if (rows.length === 0) {
     const wb = XLSX.utils.book_new();
@@ -578,14 +590,20 @@ app.get('/api/export', (req, res) => {
     return res.send(Buffer.from(buffer));
   }
 
-  const excelData = rows.map((r, i) => {
+  // Sort by roll number ascending
+  rows.sort((a, b) => {
+    const ra = (a.rollNo || '').toString();
+    const rb = (b.rollNo || '').toString();
+    return ra.localeCompare(rb, undefined, { numeric: true });
+  });
+
+  const excelData = rows.map(r => {
     const session = db.sessions.find(s => s.id === r.sessionId);
     return {
-      'S.No': i + 1,
+      'Roll No': r.rollNo || '-',
       'Name': r.name,
       'Reg No': r.regNo || r.rollNumber || '-',
       'Email': r.email,
-      'Roll No': r.rollNo || '-',
       'Year': r.year || '-',
       'Program': r.program || '-',
       'Branch': r.branch || '-',
@@ -598,9 +616,9 @@ app.get('/api/export', (req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(excelData);
   ws['!cols'] = [
-    { wch: 6 }, { wch: 25 }, { wch: 18 }, { wch: 30 },
-    { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 },
-    { wch: 35 }, { wch: 14 }, { wch: 10 },
+    { wch: 8 }, { wch: 25 }, { wch: 18 }, { wch: 30 },
+    { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 },
+    { wch: 14 }, { wch: 10 },
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
 
