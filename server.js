@@ -17,7 +17,7 @@ const PORT = process.env.PORT || 3000;
 // COLLEGE CONFIG
 // ==========================================
 const ALLOWED_EMAIL_DOMAIN = 'nitjsr.ac.in';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '188263362905-05e73in41h1ib970spt6q3meoidg2fte.apps.googleusercontent.com';
 const crypto = require('crypto');
 
 function generateSessionCode() {
