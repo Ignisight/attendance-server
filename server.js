@@ -305,7 +305,8 @@ app.get('/s/:code', (req, res) => {
   if (!session) {
     return res.send(getStudentFormHTML(null, 'Invalid or expired session link.'));
   }
-  if (!session.active) {
+  // Only block if session was explicitly stopped (has stoppedAt)
+  if (session.stoppedAt) {
     return res.send(getStudentFormHTML(null, 'This session has ended.'));
   }
   res.send(getStudentFormHTML(session));
@@ -334,7 +335,14 @@ app.post('/submit', (req, res) => {
   // Find session by code, or fall back to active session
   let activeSession;
   if (sessionCode) {
-    activeSession = db.sessions.find(s => s.code === sessionCode && s.active);
+    // Find session by code (don't require active - it may have been
+    // deactivated when teacher started a new session, but students
+    // with the link should still be able to submit)
+    activeSession = db.sessions.find(s => s.code === sessionCode);
+    if (activeSession && activeSession.stoppedAt) {
+      // Session was explicitly stopped - reject
+      return res.json({ success: false, error: 'This session has ended. Attendance is closed.' });
+    }
   } else {
     activeSession = db.sessions.find(s => s.active);
   }
