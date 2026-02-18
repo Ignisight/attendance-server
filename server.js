@@ -14,6 +14,28 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ==========================================
+// COLLEGE CONFIG
+// ==========================================
+const ALLOWED_EMAIL_DOMAIN = 'nitjsr.ac.in';
+
+// Parse roll info from email like "2046ugcm300@nitjsr.ac.in"
+function parseRollInfo(email) {
+  const local = email.split('@')[0].toLowerCase();
+  // Pattern: YYYY(ug|pg)BRANCH_CODE + ROLL_NUMBER
+  const match = local.match(/^(\d{4})(ug|pg)([a-z]{2,4})(\d+)$/i);
+  if (match) {
+    return {
+      year: match[1],
+      program: match[2].toUpperCase(),
+      branch: match[3].toUpperCase(),
+      rollNo: match[4],
+      rollNumber: local.toUpperCase(), // full roll ID
+    };
+  }
+  return { year: '-', program: '-', branch: '-', rollNo: '-', rollNumber: local.toUpperCase() };
+}
+
+// ==========================================
 // JSON FILE DATABASE
 // ==========================================
 const DB_PATH = path.join(__dirname, 'data.json');
@@ -22,28 +44,14 @@ function loadDB() {
   try {
     if (fs.existsSync(DB_PATH)) {
       const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
-      // Ensure all tables exist
       if (!data.users) data.users = [];
       if (!data.otps) data.otps = [];
       if (!data.sessions) data.sessions = [];
       if (!data.attendance) data.attendance = [];
-      if (!data.rollMap) data.rollMap = [
-        { email: 'student1@college.edu', rollNumber: '21ME001' },
-        { email: 'student2@college.edu', rollNumber: '21ME002' },
-      ];
       return data;
     }
   } catch (e) { /* ignore */ }
-  return {
-    users: [],
-    otps: [],
-    sessions: [],
-    attendance: [],
-    rollMap: [
-      { email: 'student1@college.edu', rollNumber: '21ME001' },
-      { email: 'student2@college.edu', rollNumber: '21ME002' },
-    ],
-  };
+  return { users: [], otps: [], sessions: [], attendance: [] };
 }
 
 function saveDB(data) {
@@ -51,6 +59,22 @@ function saveDB(data) {
 }
 
 let db = loadDB();
+
+// Clean up sessions older than 2 days
+function cleanOldData() {
+  const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+  const oldSessionIds = db.sessions
+    .filter(s => new Date(s.createdAt).getTime() < twoDaysAgo)
+    .map(s => s.id);
+  if (oldSessionIds.length > 0) {
+    db.sessions = db.sessions.filter(s => !oldSessionIds.includes(s.id));
+    db.attendance = db.attendance.filter(a => !oldSessionIds.includes(a.sessionId));
+    saveDB(db);
+    console.log(`  🗑️  Cleaned ${oldSessionIds.length} old sessions`);
+  }
+}
+cleanOldData();
+setInterval(cleanOldData, 60 * 60 * 1000); // Every hour
 
 // ==========================================
 // MIDDLEWARE
@@ -63,17 +87,14 @@ app.use(express.urlencoded({ extended: true }));
 // AUTH ENDPOINTS
 // ==========================================
 
-// Register
 app.post('/api/register', async (req, res) => {
-  const { email, password, name } = req.body;
+  const { email, password, name, college, department } = req.body;
 
   if (!email || !password || !name) {
     return res.json({ success: false, error: 'Name, email and password are required' });
   }
 
   const emailLower = email.toLowerCase().trim();
-
-  // Check if user exists
   const existing = db.users.find(u => u.email === emailLower);
   if (existing) {
     return res.json({ success: false, error: 'An account with this email already exists' });
@@ -88,6 +109,8 @@ app.post('/api/register', async (req, res) => {
     id: Date.now(),
     email: emailLower,
     name: name.trim(),
+    college: (college || '').trim(),
+    department: (department || '').trim(),
     password: hashedPassword,
     createdAt: new Date().toISOString(),
   });
@@ -96,7 +119,6 @@ app.post('/api/register', async (req, res) => {
   res.json({ success: true, message: 'Account created! You can now login.' });
 });
 
-// Login
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
 
@@ -118,13 +140,19 @@ app.post('/api/login', async (req, res) => {
 
   res.json({
     success: true,
-    user: { id: user.id, email: user.email, name: user.name },
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      college: user.college || '',
+      department: user.department || '',
+    },
   });
 });
 
-// Forgot Password — send OTP
-app.post('/api/forgot-password', (req, res) => {
-  const { email } = req.body;
+// Update profile
+app.post('/api/update-profile', async (req, res) => {
+  const { email, name, college, department } = req.body;
 
   if (!email) {
     return res.json({ success: false, error: 'Email is required' });
@@ -134,31 +162,48 @@ app.post('/api/forgot-password', (req, res) => {
   const user = db.users.find(u => u.email === emailLower);
 
   if (!user) {
-    return res.json({ success: false, error: 'No account found with this email' });
+    return res.json({ success: false, error: 'User not found' });
   }
 
-  // Generate 6-digit OTP
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
+  if (name) user.name = name.trim();
+  if (college !== undefined) user.college = college.trim();
+  if (department !== undefined) user.department = department.trim();
+  saveDB(db);
 
-  // Remove old OTPs for this email
+  res.json({
+    success: true,
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      college: user.college,
+      department: user.department,
+    },
+  });
+});
+
+app.post('/api/forgot-password', (req, res) => {
+  const { email } = req.body;
+
+  if (!email) return res.json({ success: false, error: 'Email is required' });
+
+  const emailLower = email.toLowerCase().trim();
+  const user = db.users.find(u => u.email === emailLower);
+
+  if (!user) return res.json({ success: false, error: 'No account found with this email' });
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = Date.now() + 10 * 60 * 1000;
+
   db.otps = db.otps.filter(o => o.email !== emailLower);
   db.otps.push({ email: emailLower, otp, expiresAt });
   saveDB(db);
 
-  // Log OTP to console (visible in Render logs)
   console.log(`\n  🔑 OTP for ${emailLower}: ${otp}\n`);
 
-  // Return OTP in response for now (the app will show it)
-  // In production, you'd send this via email
-  res.json({
-    success: true,
-    message: 'OTP generated. Check server logs or use the code below.',
-    otp: otp, // Remove this line in production
-  });
+  res.json({ success: true, message: 'OTP generated.', otp: otp });
 });
 
-// Verify OTP and reset password
 app.post('/api/reset-password', async (req, res) => {
   const { email, otp, newPassword } = req.body;
 
@@ -167,13 +212,9 @@ app.post('/api/reset-password', async (req, res) => {
   }
 
   const emailLower = email.toLowerCase().trim();
-
-  // Find valid OTP
   const otpEntry = db.otps.find(o => o.email === emailLower && o.otp === otp);
 
-  if (!otpEntry) {
-    return res.json({ success: false, error: 'Invalid OTP' });
-  }
+  if (!otpEntry) return res.json({ success: false, error: 'Invalid OTP' });
 
   if (Date.now() > otpEntry.expiresAt) {
     db.otps = db.otps.filter(o => o.email !== emailLower);
@@ -185,15 +226,10 @@ app.post('/api/reset-password', async (req, res) => {
     return res.json({ success: false, error: 'Password must be at least 4 characters' });
   }
 
-  // Update password
   const user = db.users.find(u => u.email === emailLower);
-  if (!user) {
-    return res.json({ success: false, error: 'User not found' });
-  }
+  if (!user) return res.json({ success: false, error: 'User not found' });
 
   user.password = await bcrypt.hash(newPassword, 10);
-
-  // Remove used OTP
   db.otps = db.otps.filter(o => o.email !== emailLower);
   saveDB(db);
 
@@ -201,7 +237,7 @@ app.post('/api/reset-password', async (req, res) => {
 });
 
 // ==========================================
-// STUDENT FORM PAGE — served at /
+// STUDENT FORM PAGE
 // ==========================================
 app.get('/', (req, res) => {
   const activeSession = db.sessions.find(s => s.active);
@@ -218,12 +254,20 @@ app.post('/submit', (req, res) => {
     return res.json({ success: false, error: 'Email and name are required' });
   }
 
+  const emailLower = email.toLowerCase().trim();
+
+  // Validate college email domain
+  if (!emailLower.endsWith('@' + ALLOWED_EMAIL_DOMAIN)) {
+    return res.json({
+      success: false,
+      error: `Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.`,
+    });
+  }
+
   const activeSession = db.sessions.find(s => s.active);
   if (!activeSession) {
     return res.json({ success: false, error: 'No active session. Please wait for your teacher to start one.' });
   }
-
-  const emailLower = email.toLowerCase().trim();
 
   // Check duplicate
   const dup = db.attendance.find(a => a.sessionId === activeSession.id && a.email === emailLower);
@@ -231,16 +275,19 @@ app.post('/submit', (req, res) => {
     return res.json({ success: false, error: 'You have already submitted for this session.' });
   }
 
-  // Lookup roll number
-  const rollEntry = db.rollMap.find(r => r.email === emailLower);
-  const rollNumber = rollEntry ? rollEntry.rollNumber : 'NOT MAPPED';
+  // Auto-parse roll info from email
+  const rollInfo = parseRollInfo(emailLower);
 
   const now = new Date();
   db.attendance.push({
     sessionId: activeSession.id,
     email: emailLower,
     name: name.trim(),
-    rollNumber: rollNumber,
+    rollNumber: rollInfo.rollNumber,
+    year: rollInfo.year,
+    program: rollInfo.program,
+    branch: rollInfo.branch,
+    rollNo: rollInfo.rollNo,
     submittedAt: now.toISOString(),
     date: now.toLocaleDateString('en-IN'),
     time: now.toLocaleTimeString('en-IN', { hour12: false }),
@@ -254,14 +301,12 @@ app.post('/submit', (req, res) => {
 // TEACHER API
 // ==========================================
 
-// Start a new session
 app.post('/api/start-session', (req, res) => {
   const { sessionName } = req.body;
   if (!sessionName || !sessionName.trim()) {
     return res.json({ success: false, error: 'Session name is required' });
   }
 
-  // Close any active sessions
   db.sessions.forEach(s => { s.active = false; });
 
   const id = Date.now();
@@ -273,7 +318,6 @@ app.post('/api/start-session', (req, res) => {
   });
   saveDB(db);
 
-  // Return the public URL (Render URL or local)
   const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://${getLocalIP()}:${PORT}`;
   res.json({
     success: true,
@@ -283,20 +327,17 @@ app.post('/api/start-session', (req, res) => {
   });
 });
 
-// Stop current session
 app.post('/api/stop-session', (req, res) => {
   db.sessions.forEach(s => { s.active = false; });
   saveDB(db);
   res.json({ success: true, message: 'Session stopped' });
 });
 
-// Get session status
 app.get('/api/status', (req, res) => {
   const session = db.sessions.find(s => s.active);
   res.json({ active: !!session, session: session || null });
 });
 
-// Get responses
 app.get('/api/responses', (req, res) => {
   const { sessionName } = req.query;
 
@@ -317,14 +358,30 @@ app.get('/api/responses', (req, res) => {
         'Email': r.email,
         'Name': r.name,
         'Roll Number': r.rollNumber,
-        'Session Name': session ? session.name : 'Unknown',
+        'Year': r.year || '-',
+        'Program': r.program || '-',
+        'Branch': r.branch || '-',
+        'Roll No': r.rollNo || '-',
+        'Session': session ? session.name : 'Unknown',
         'Date': r.date,
         'Time': r.time,
       };
     }),
     count: rows.length,
-    headers: ['Email', 'Name', 'Roll Number', 'Session Name', 'Date', 'Time'],
+    headers: ['Email', 'Name', 'Roll Number', 'Year', 'Program', 'Branch', 'Roll No', 'Session', 'Date', 'Time'],
   });
+});
+
+// Session history
+app.get('/api/history', (req, res) => {
+  const sessions = db.sessions.map(s => ({
+    id: s.id,
+    name: s.name,
+    createdAt: s.createdAt,
+    active: s.active,
+    responseCount: db.attendance.filter(a => a.sessionId === s.id).length,
+  }));
+  res.json({ success: true, sessions: sessions.reverse() });
 });
 
 // Export as Excel
@@ -332,11 +389,24 @@ app.get('/api/export', (req, res) => {
   const { sessionName } = req.query;
 
   let rows;
+  let sheetTitle = 'All Sessions';
   if (sessionName) {
     const session = db.sessions.find(s => s.name === sessionName);
     rows = session ? db.attendance.filter(a => a.sessionId === session.id) : [];
+    sheetTitle = sessionName;
   } else {
     rows = db.attendance;
+  }
+
+  if (rows.length === 0) {
+    // Return empty Excel with headers
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([['Email', 'Name', 'Roll Number', 'Year', 'Program', 'Branch', 'Roll No', 'Session', 'Date', 'Time']]);
+    XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="Attendance_Empty.xlsx"`);
+    return res.send(Buffer.from(buffer));
   }
 
   const excelData = rows.map(r => {
@@ -345,7 +415,11 @@ app.get('/api/export', (req, res) => {
       'Email': r.email,
       'Name': r.name,
       'Roll Number': r.rollNumber,
-      'Session Name': session ? session.name : 'Unknown',
+      'Year': r.year || '-',
+      'Program': r.program || '-',
+      'Branch': r.branch || '-',
+      'Roll No': r.rollNo || '-',
+      'Session': session ? session.name : 'Unknown',
       'Date': r.date,
       'Time': r.time,
     };
@@ -353,7 +427,11 @@ app.get('/api/export', (req, res) => {
 
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(excelData);
-  ws['!cols'] = [{ wch: 30 }, { wch: 25 }, { wch: 15 }, { wch: 35 }, { wch: 14 }, { wch: 10 }];
+  ws['!cols'] = [
+    { wch: 30 }, { wch: 25 }, { wch: 18 }, { wch: 8 },
+    { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 },
+    { wch: 14 }, { wch: 10 },
+  ];
   XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
 
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -363,37 +441,7 @@ app.get('/api/export', (req, res) => {
 
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
-  res.send(buffer);
-});
-
-// Get all sessions
-app.get('/api/sessions', (req, res) => {
-  const sessions = db.sessions.map(s => ({
-    ...s,
-    responseCount: db.attendance.filter(a => a.sessionId === s.id).length,
-  }));
-  res.json({ success: true, sessions: sessions.reverse() });
-});
-
-// Manage roll map
-app.get('/api/roll-map', (req, res) => {
-  res.json({ success: true, entries: db.rollMap });
-});
-
-app.post('/api/roll-map', (req, res) => {
-  const { email, rollNumber } = req.body;
-  if (!email || !rollNumber) {
-    return res.json({ success: false, error: 'Email and roll number required' });
-  }
-  const emailLower = email.toLowerCase().trim();
-  const existing = db.rollMap.findIndex(r => r.email === emailLower);
-  if (existing >= 0) {
-    db.rollMap[existing].rollNumber = rollNumber.trim();
-  } else {
-    db.rollMap.push({ email: emailLower, rollNumber: rollNumber.trim() });
-  }
-  saveDB(db);
-  res.json({ success: true });
+  res.send(Buffer.from(buffer));
 });
 
 // ==========================================
@@ -413,7 +461,7 @@ function getLocalIP() {
 }
 
 // ==========================================
-// STUDENT FORM HTML
+// STUDENT FORM HTML — with Google-style email picker
 // ==========================================
 
 function getStudentFormHTML(session) {
@@ -425,33 +473,26 @@ function getStudentFormHTML(session) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Attendance</title>
+  <title>Attendance — NIT Jamshedpur</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
       font-family: 'Inter', system-ui, sans-serif;
       background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 20px;
+      min-height: 100vh; display: flex; justify-content: center;
+      align-items: center; padding: 20px;
     }
     .card {
-      background: rgba(30, 41, 59, 0.95);
-      backdrop-filter: blur(20px);
-      border-radius: 24px;
-      padding: 36px 32px;
-      width: 100%;
-      max-width: 440px;
+      background: rgba(30, 41, 59, 0.95); backdrop-filter: blur(20px);
+      border-radius: 24px; padding: 36px 32px; width: 100%; max-width: 440px;
       box-shadow: 0 20px 60px rgba(0,0,0,0.4), 0 0 40px rgba(99, 102, 241, 0.1);
       border: 1px solid rgba(99, 102, 241, 0.15);
     }
     .icon { text-align: center; font-size: 52px; margin-bottom: 12px; }
     h1 { text-align: center; font-size: 26px; font-weight: 800; color: #f1f5f9; margin-bottom: 4px; }
     .session-badge {
-      text-align: center; margin: 8px auto 28px;
+      text-align: center; margin: 8px auto 20px;
       background: linear-gradient(135deg, #312e81, #4338ca);
       color: #c7d2fe; padding: 6px 16px; border-radius: 20px;
       font-size: 13px; font-weight: 600;
@@ -459,14 +500,40 @@ function getStudentFormHTML(session) {
     .closed { text-align: center; color: #f87171; font-size: 17px; padding: 32px 0; line-height: 1.7; }
     .field { margin-bottom: 18px; }
     label { display: block; font-size: 13px; font-weight: 600; color: #94a3b8; margin-bottom: 8px; letter-spacing: 0.5px; text-transform: uppercase; }
-    input {
+    input, select {
       width: 100%; padding: 15px 18px; border-radius: 14px;
       border: 2px solid #334155; background: #0f172a; color: #f1f5f9;
       font-size: 16px; font-family: inherit; outline: none;
       transition: border-color 0.3s, box-shadow 0.3s;
+      -webkit-appearance: none;
     }
-    input:focus { border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
+    input:focus, select:focus { border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
     input::placeholder { color: #475569; }
+
+    /* Email account picker */
+    .email-display {
+      background: #0f172a; border: 2px solid #334155; border-radius: 14px;
+      padding: 14px 18px; display: flex; align-items: center; gap: 12px;
+      cursor: pointer; transition: border-color 0.3s;
+    }
+    .email-display:hover { border-color: #6366f1; }
+    .email-avatar {
+      width: 40px; height: 40px; border-radius: 50%;
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px; font-weight: 700; color: white; flex-shrink: 0;
+    }
+    .email-info { flex: 1; }
+    .email-info .email-text { font-size: 15px; color: #f1f5f9; font-weight: 500; }
+    .email-info .email-hint { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .switch-link { color: #818cf8; font-size: 13px; font-weight: 600; text-decoration: none; }
+
+    .domain-note {
+      font-size: 12px; color: #f59e0b; margin-top: 8px;
+      background: rgba(245, 158, 11, 0.1); padding: 8px 12px; border-radius: 8px;
+      border: 1px solid rgba(245, 158, 11, 0.2);
+    }
+
     .btn {
       width: 100%; padding: 16px; border: none; border-radius: 14px;
       background: linear-gradient(135deg, #6366f1, #4f46e5);
@@ -475,7 +542,6 @@ function getStudentFormHTML(session) {
       box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
     }
     .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4); }
-    .btn:active { transform: translateY(0); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
     .success { text-align: center; padding: 24px 0; }
     .success .check { font-size: 72px; animation: pop 0.4s ease; }
@@ -491,40 +557,67 @@ function getStudentFormHTML(session) {
       <div class="icon">📋</div>
       <h1>Mark Attendance</h1>
       <div class="session-badge">${escapeHtml(sessionName)}</div>
+
       <div id="formDiv">
         <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left;">
+
+          <!-- Email Field: Google-style account selector -->
           <div class="field">
             <label>College Email</label>
-            <input type="email" id="email" required placeholder="yourname@college.edu" autocomplete="email">
+            <div id="emailPickerArea">
+              <input type="email" id="email" required
+                placeholder="yourname@${ALLOWED_EMAIL_DOMAIN}"
+                autocomplete="email"
+                pattern="[a-zA-Z0-9._%+-]+@${ALLOWED_EMAIL_DOMAIN.replace(/\./g, '\\\\.')}"
+                title="Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed">
+              <div class="domain-note">
+                ⚠️ Only <strong>@${ALLOWED_EMAIL_DOMAIN}</strong> emails accepted
+              </div>
+            </div>
           </div>
+
           <div class="field">
             <label>Full Name</label>
             <input type="text" id="fullname" required placeholder="Your full name" autocomplete="name">
           </div>
+
           <button type="submit" class="btn" id="submitBtn">✅ Submit Attendance</button>
           <div id="error"></div>
         </form>
       </div>
+
       <div id="successMsg" style="display:none">
         <div class="success">
           <div class="check">✅</div>
           <h2>Attendance Recorded!</h2>
           <p>You're marked present for this session.</p>
+          <p style="color:#64748b; font-size:13px; margin-top:12px;" id="rollDisplay"></p>
         </div>
       </div>
+
       <script>
         function submitForm(e) {
           e.preventDefault();
           var btn = document.getElementById('submitBtn');
           var errDiv = document.getElementById('error');
+          var emailVal = document.getElementById('email').value.trim().toLowerCase();
+
+          // Client-side domain check
+          if (!emailVal.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
+            errDiv.textContent = 'Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.';
+            errDiv.style.display = 'block';
+            return false;
+          }
+
           btn.disabled = true;
           btn.textContent = '⏳ Submitting...';
           errDiv.style.display = 'none';
+
           fetch('/submit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              email: document.getElementById('email').value.trim(),
+              email: emailVal,
               name: document.getElementById('fullname').value.trim()
             })
           })
@@ -533,6 +626,9 @@ function getStudentFormHTML(session) {
             if (data.success) {
               document.getElementById('formDiv').style.display = 'none';
               document.getElementById('successMsg').style.display = 'block';
+              // Show parsed roll number
+              var rollPart = emailVal.split('@')[0].toUpperCase();
+              document.getElementById('rollDisplay').textContent = 'Roll: ' + rollPart;
             } else {
               errDiv.textContent = data.error || 'Failed';
               errDiv.style.display = 'block';
@@ -552,7 +648,7 @@ function getStudentFormHTML(session) {
     ` : `
       <div class="closed">
         <div style="font-size:56px;margin-bottom:16px;">⏳</div>
-        <h1 style="color:#f1f5f9; margin-bottom:16px;">Attendance</h1>
+        <h1 style="color:#f1f5f9; margin-bottom:16px;">Attendance — NIT Jamshedpur</h1>
         No active session right now.<br>
         Wait for your teacher to start one.
       </div>
@@ -573,10 +669,13 @@ app.listen(PORT, '0.0.0.0', () => {
   const ip = getLocalIP();
   console.log('');
   console.log('  ╔════════════════════════════════════════════╗');
-  console.log('  ║   📋  Attendance System Server  Running   ║');
+  console.log('  ║   📋  Attendance Server — NIT Jamshedpur  ║');
   console.log('  ╠════════════════════════════════════════════╣');
   console.log(`  ║  Local:    http://localhost:${PORT}           ║`);
   console.log(`  ║  Network:  http://${ip}:${PORT}      ║`);
+  console.log('  ╠════════════════════════════════════════════╣');
+  console.log(`  ║  Email Domain: @${ALLOWED_EMAIL_DOMAIN}      ║`);
+  console.log('  ║  Data Retention: 2 days                   ║');
   console.log('  ╚════════════════════════════════════════════╝');
   console.log('');
 });
