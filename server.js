@@ -1,9 +1,6 @@
 // =============================================
 // Attendance System — Self-Contained Server
 // =============================================
-// Run: node server.js
-// That's it! No accounts, no APIs, no setup.
-// =============================================
 
 const express = require('express');
 const cors = require('cors');
@@ -11,26 +8,41 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 const XLSX = require('xlsx');
+const bcrypt = require('bcryptjs');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // ==========================================
-// JSON FILE DATABASE (zero dependencies)
+// JSON FILE DATABASE
 // ==========================================
 const DB_PATH = path.join(__dirname, 'data.json');
 
 function loadDB() {
   try {
     if (fs.existsSync(DB_PATH)) {
-      return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+      // Ensure all tables exist
+      if (!data.users) data.users = [];
+      if (!data.otps) data.otps = [];
+      if (!data.sessions) data.sessions = [];
+      if (!data.attendance) data.attendance = [];
+      if (!data.rollMap) data.rollMap = [
+        { email: 'student1@college.edu', rollNumber: '21ME001' },
+        { email: 'student2@college.edu', rollNumber: '21ME002' },
+      ];
+      return data;
     }
   } catch (e) { /* ignore */ }
   return {
-    sessions: [], attendance: [], rollMap: [
+    users: [],
+    otps: [],
+    sessions: [],
+    attendance: [],
+    rollMap: [
       { email: 'student1@college.edu', rollNumber: '21ME001' },
       { email: 'student2@college.edu', rollNumber: '21ME002' },
-    ]
+    ],
   };
 }
 
@@ -46,6 +58,147 @@ let db = loadDB();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ==========================================
+// AUTH ENDPOINTS
+// ==========================================
+
+// Register
+app.post('/api/register', async (req, res) => {
+  const { email, password, name } = req.body;
+
+  if (!email || !password || !name) {
+    return res.json({ success: false, error: 'Name, email and password are required' });
+  }
+
+  const emailLower = email.toLowerCase().trim();
+
+  // Check if user exists
+  const existing = db.users.find(u => u.email === emailLower);
+  if (existing) {
+    return res.json({ success: false, error: 'An account with this email already exists' });
+  }
+
+  if (password.length < 4) {
+    return res.json({ success: false, error: 'Password must be at least 4 characters' });
+  }
+
+  const hashedPassword = await bcrypt.hash(password, 10);
+  db.users.push({
+    id: Date.now(),
+    email: emailLower,
+    name: name.trim(),
+    password: hashedPassword,
+    createdAt: new Date().toISOString(),
+  });
+  saveDB(db);
+
+  res.json({ success: true, message: 'Account created! You can now login.' });
+});
+
+// Login
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.json({ success: false, error: 'Email and password are required' });
+  }
+
+  const emailLower = email.toLowerCase().trim();
+  const user = db.users.find(u => u.email === emailLower);
+
+  if (!user) {
+    return res.json({ success: false, error: 'No account found with this email' });
+  }
+
+  const match = await bcrypt.compare(password, user.password);
+  if (!match) {
+    return res.json({ success: false, error: 'Incorrect password' });
+  }
+
+  res.json({
+    success: true,
+    user: { id: user.id, email: user.email, name: user.name },
+  });
+});
+
+// Forgot Password — send OTP
+app.post('/api/forgot-password', (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.json({ success: false, error: 'Email is required' });
+  }
+
+  const emailLower = email.toLowerCase().trim();
+  const user = db.users.find(u => u.email === emailLower);
+
+  if (!user) {
+    return res.json({ success: false, error: 'No account found with this email' });
+  }
+
+  // Generate 6-digit OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
+
+  // Remove old OTPs for this email
+  db.otps = db.otps.filter(o => o.email !== emailLower);
+  db.otps.push({ email: emailLower, otp, expiresAt });
+  saveDB(db);
+
+  // Log OTP to console (visible in Render logs)
+  console.log(`\n  🔑 OTP for ${emailLower}: ${otp}\n`);
+
+  // Return OTP in response for now (the app will show it)
+  // In production, you'd send this via email
+  res.json({
+    success: true,
+    message: 'OTP generated. Check server logs or use the code below.',
+    otp: otp, // Remove this line in production
+  });
+});
+
+// Verify OTP and reset password
+app.post('/api/reset-password', async (req, res) => {
+  const { email, otp, newPassword } = req.body;
+
+  if (!email || !otp || !newPassword) {
+    return res.json({ success: false, error: 'Email, OTP and new password are required' });
+  }
+
+  const emailLower = email.toLowerCase().trim();
+
+  // Find valid OTP
+  const otpEntry = db.otps.find(o => o.email === emailLower && o.otp === otp);
+
+  if (!otpEntry) {
+    return res.json({ success: false, error: 'Invalid OTP' });
+  }
+
+  if (Date.now() > otpEntry.expiresAt) {
+    db.otps = db.otps.filter(o => o.email !== emailLower);
+    saveDB(db);
+    return res.json({ success: false, error: 'OTP has expired. Request a new one.' });
+  }
+
+  if (newPassword.length < 4) {
+    return res.json({ success: false, error: 'Password must be at least 4 characters' });
+  }
+
+  // Update password
+  const user = db.users.find(u => u.email === emailLower);
+  if (!user) {
+    return res.json({ success: false, error: 'User not found' });
+  }
+
+  user.password = await bcrypt.hash(newPassword, 10);
+
+  // Remove used OTP
+  db.otps = db.otps.filter(o => o.email !== emailLower);
+  saveDB(db);
+
+  res.json({ success: true, message: 'Password reset! You can now login.' });
+});
 
 // ==========================================
 // STUDENT FORM PAGE — served at /
@@ -120,12 +273,13 @@ app.post('/api/start-session', (req, res) => {
   });
   saveDB(db);
 
-  const localIP = getLocalIP();
+  // Return the public URL (Render URL or local)
+  const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://${getLocalIP()}:${PORT}`;
   res.json({
     success: true,
     sessionId: id,
     sessionName: sessionName.trim(),
-    formUrl: `http://${localIP}:${PORT}`,
+    formUrl: baseUrl,
   });
 });
 
@@ -297,51 +451,27 @@ function getStudentFormHTML(session) {
     .icon { text-align: center; font-size: 52px; margin-bottom: 12px; }
     h1 { text-align: center; font-size: 26px; font-weight: 800; color: #f1f5f9; margin-bottom: 4px; }
     .session-badge {
-      text-align: center;
-      margin: 8px auto 28px;
+      text-align: center; margin: 8px auto 28px;
       background: linear-gradient(135deg, #312e81, #4338ca);
-      color: #c7d2fe;
-      padding: 6px 16px;
-      border-radius: 20px;
-      font-size: 13px;
-      font-weight: 600;
+      color: #c7d2fe; padding: 6px 16px; border-radius: 20px;
+      font-size: 13px; font-weight: 600;
     }
-    .closed {
-      text-align: center;
-      color: #f87171;
-      font-size: 17px;
-      padding: 32px 0;
-      line-height: 1.7;
-    }
+    .closed { text-align: center; color: #f87171; font-size: 17px; padding: 32px 0; line-height: 1.7; }
     .field { margin-bottom: 18px; }
     label { display: block; font-size: 13px; font-weight: 600; color: #94a3b8; margin-bottom: 8px; letter-spacing: 0.5px; text-transform: uppercase; }
     input {
-      width: 100%;
-      padding: 15px 18px;
-      border-radius: 14px;
-      border: 2px solid #334155;
-      background: #0f172a;
-      color: #f1f5f9;
-      font-size: 16px;
-      font-family: inherit;
-      outline: none;
+      width: 100%; padding: 15px 18px; border-radius: 14px;
+      border: 2px solid #334155; background: #0f172a; color: #f1f5f9;
+      font-size: 16px; font-family: inherit; outline: none;
       transition: border-color 0.3s, box-shadow 0.3s;
     }
     input:focus { border-color: #6366f1; box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15); }
     input::placeholder { color: #475569; }
     .btn {
-      width: 100%;
-      padding: 16px;
-      border: none;
-      border-radius: 14px;
+      width: 100%; padding: 16px; border: none; border-radius: 14px;
       background: linear-gradient(135deg, #6366f1, #4f46e5);
-      color: white;
-      font-size: 17px;
-      font-weight: 700;
-      font-family: inherit;
-      cursor: pointer;
-      margin-top: 8px;
-      transition: all 0.3s;
+      color: white; font-size: 17px; font-weight: 700; font-family: inherit;
+      cursor: pointer; margin-top: 8px; transition: all 0.3s;
       box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
     }
     .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4); }
@@ -353,7 +483,6 @@ function getStudentFormHTML(session) {
     .success p { color: #94a3b8; font-size: 15px; }
     #error { color: #f87171; text-align: center; margin-top: 14px; font-size: 14px; font-weight: 500; display: none; }
     @keyframes pop { 0% { transform: scale(0); } 60% { transform: scale(1.2); } 100% { transform: scale(1); } }
-    .note { font-size: 12px; color: #475569; margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -362,7 +491,6 @@ function getStudentFormHTML(session) {
       <div class="icon">📋</div>
       <h1>Mark Attendance</h1>
       <div class="session-badge">${escapeHtml(sessionName)}</div>
-
       <div id="formDiv">
         <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left;">
           <div class="field">
@@ -377,7 +505,6 @@ function getStudentFormHTML(session) {
           <div id="error"></div>
         </form>
       </div>
-
       <div id="successMsg" style="display:none">
         <div class="success">
           <div class="check">✅</div>
@@ -385,7 +512,6 @@ function getStudentFormHTML(session) {
           <p>You're marked present for this session.</p>
         </div>
       </div>
-
       <script>
         function submitForm(e) {
           e.preventDefault();
@@ -394,7 +520,6 @@ function getStudentFormHTML(session) {
           btn.disabled = true;
           btn.textContent = '⏳ Submitting...';
           errDiv.style.display = 'none';
-
           fetch('/submit', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -452,9 +577,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  ╠════════════════════════════════════════════╣');
   console.log(`  ║  Local:    http://localhost:${PORT}           ║`);
   console.log(`  ║  Network:  http://${ip}:${PORT}      ║`);
-  console.log('  ╠════════════════════════════════════════════╣');
-  console.log('  ║  📱 Enter the Network URL in teacher app  ║');
-  console.log('  ║  📋 Students scan QR → opens the form     ║');
   console.log('  ╚════════════════════════════════════════════╝');
   console.log('');
 });
