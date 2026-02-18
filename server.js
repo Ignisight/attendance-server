@@ -313,14 +313,14 @@ app.post('/submit', (req, res) => {
     sessionId: activeSession.id,
     email: emailLower,
     name: name.trim(),
-    rollNumber: rollInfo.rollNumber,
+    regNo: rollInfo.rollNumber,
     year: rollInfo.year,
     program: rollInfo.program,
     branch: rollInfo.branch,
     rollNo: rollInfo.rollNo,
     submittedAt: now.toISOString(),
     date: now.toLocaleDateString('en-IN'),
-    time: now.toLocaleTimeString('en-IN', { hour12: false }),
+    time: now.toLocaleTimeString('en-IN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
   });
   saveDB(db);
 
@@ -371,6 +371,18 @@ app.post('/api/stop-session', (req, res) => {
   res.json({ success: true, message: 'Session stopped' });
 });
 
+// Stop a specific session by ID (from history)
+app.post('/api/sessions/:id/stop', (req, res) => {
+  const id = parseInt(req.params.id);
+  const session = db.sessions.find(s => s.id === id);
+  if (!session) return res.json({ success: false, error: 'Session not found' });
+  if (!session.active) return res.json({ success: false, error: 'Session already stopped' });
+  session.active = false;
+  session.stoppedAt = new Date().toISOString();
+  saveDB(db);
+  res.json({ success: true, message: 'Session stopped' });
+});
+
 app.get('/api/status', (req, res) => {
   const session = db.sessions.find(s => s.active);
   res.json({ active: !!session, session: session || null });
@@ -390,23 +402,24 @@ app.get('/api/responses', (req, res) => {
 
   res.json({
     success: true,
-    responses: rows.map(r => {
+    responses: rows.map((r, i) => {
       const session = db.sessions.find(s => s.id === r.sessionId);
       return {
-        'Email': r.email,
+        'S.No': i + 1,
         'Name': r.name,
-        'Roll Number': r.rollNumber,
+        'Reg No': r.regNo || r.rollNumber || '-',
+        'Email': r.email,
+        'Roll No': r.rollNo || '-',
         'Year': r.year || '-',
         'Program': r.program || '-',
         'Branch': r.branch || '-',
-        'Roll No': r.rollNo || '-',
         'Session': session ? session.name : 'Unknown',
         'Date': r.date,
         'Time': r.time,
       };
     }),
     count: rows.length,
-    headers: ['Email', 'Name', 'Roll Number', 'Year', 'Program', 'Branch', 'Roll No', 'Session', 'Date', 'Time'],
+    headers: ['S.No', 'Name', 'Reg No', 'Email', 'Roll No', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'],
   });
 });
 
@@ -463,23 +476,31 @@ app.get('/api/export-multi', (req, res) => {
     ? db.attendance.filter(a => sessionIds.includes(a.sessionId))
     : db.attendance;
 
-  const excelData = rows.map(r => {
+  const excelData = rows.map((r, i) => {
     const session = db.sessions.find(s => s.id === r.sessionId);
     return {
-      'Email': r.email, 'Name': r.name, 'Roll Number': r.rollNumber,
-      'Year': r.year || '-', 'Program': r.program || '-', 'Branch': r.branch || '-',
-      'Roll No': r.rollNo || '-', 'Session': session ? session.name : 'Unknown',
-      'Date': r.date, 'Time': r.time,
+      'S.No': i + 1,
+      'Name': r.name,
+      'Reg No': r.regNo || r.rollNumber || '-',
+      'Email': r.email,
+      'Roll No': r.rollNo || '-',
+      'Year': r.year || '-',
+      'Program': r.program || '-',
+      'Branch': r.branch || '-',
+      'Session': session ? session.name : 'Unknown',
+      'Date': r.date,
+      'Time': r.time,
     };
   });
 
+  const excelHeaders = ['S.No', 'Name', 'Reg No', 'Email', 'Roll No', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'];
   const wb = XLSX.utils.book_new();
   if (excelData.length === 0) {
-    const ws = XLSX.utils.aoa_to_sheet([['Email', 'Name', 'Roll Number', 'Year', 'Program', 'Branch', 'Roll No', 'Session', 'Date', 'Time']]);
+    const ws = XLSX.utils.aoa_to_sheet([excelHeaders]);
     XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
   } else {
     const ws = XLSX.utils.json_to_sheet(excelData);
-    ws['!cols'] = [{ wch: 30 }, { wch: 25 }, { wch: 18 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 }, { wch: 14 }, { wch: 10 }];
+    ws['!cols'] = [{ wch: 6 }, { wch: 25 }, { wch: 18 }, { wch: 30 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 }, { wch: 14 }, { wch: 10 }];
     XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
   }
   const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -502,10 +523,11 @@ app.get('/api/export', (req, res) => {
     rows = db.attendance;
   }
 
+  const excelHeaders = ['S.No', 'Name', 'Reg No', 'Email', 'Roll No', 'Year', 'Program', 'Branch', 'Session', 'Date', 'Time'];
+
   if (rows.length === 0) {
-    // Return empty Excel with headers
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.aoa_to_sheet([['Email', 'Name', 'Roll Number', 'Year', 'Program', 'Branch', 'Roll No', 'Session', 'Date', 'Time']]);
+    const ws = XLSX.utils.aoa_to_sheet([excelHeaders]);
     XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
     const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -513,16 +535,17 @@ app.get('/api/export', (req, res) => {
     return res.send(Buffer.from(buffer));
   }
 
-  const excelData = rows.map(r => {
+  const excelData = rows.map((r, i) => {
     const session = db.sessions.find(s => s.id === r.sessionId);
     return {
-      'Email': r.email,
+      'S.No': i + 1,
       'Name': r.name,
-      'Roll Number': r.rollNumber,
+      'Reg No': r.regNo || r.rollNumber || '-',
+      'Email': r.email,
+      'Roll No': r.rollNo || '-',
       'Year': r.year || '-',
       'Program': r.program || '-',
       'Branch': r.branch || '-',
-      'Roll No': r.rollNo || '-',
       'Session': session ? session.name : 'Unknown',
       'Date': r.date,
       'Time': r.time,
@@ -532,9 +555,9 @@ app.get('/api/export', (req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.json_to_sheet(excelData);
   ws['!cols'] = [
-    { wch: 30 }, { wch: 25 }, { wch: 18 }, { wch: 8 },
-    { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 },
-    { wch: 14 }, { wch: 10 },
+    { wch: 6 }, { wch: 25 }, { wch: 18 }, { wch: 30 },
+    { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 },
+    { wch: 35 }, { wch: 14 }, { wch: 10 },
   ];
   XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
 
