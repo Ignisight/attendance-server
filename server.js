@@ -242,6 +242,49 @@ app.post('/api/reset-password', async (req, res) => {
   res.json({ success: true, message: 'Password reset! You can now login.' });
 });
 
+// Update profile
+app.post('/api/update-profile', (req, res) => {
+  const { email, name, college, department } = req.body;
+  if (!email) return res.json({ success: false, error: 'Email is required' });
+
+  const user = db.users.find(u => u.email === email.toLowerCase().trim());
+  if (!user) return res.json({ success: false, error: 'User not found' });
+
+  if (name !== undefined) user.name = name.trim();
+  if (college !== undefined) user.college = college.trim();
+  if (department !== undefined) user.department = department.trim();
+  saveDB(db);
+
+  res.json({
+    success: true,
+    message: 'Profile updated!',
+    user: { name: user.name, email: user.email, college: user.college, department: user.department },
+  });
+});
+
+// Change password (requires current password)
+app.post('/api/change-password', async (req, res) => {
+  const { email, currentPassword, newPassword } = req.body;
+  if (!email || !currentPassword || !newPassword) {
+    return res.json({ success: false, error: 'All fields are required' });
+  }
+
+  const user = db.users.find(u => u.email === email.toLowerCase().trim());
+  if (!user) return res.json({ success: false, error: 'User not found' });
+
+  const valid = await bcrypt.compare(currentPassword, user.password);
+  if (!valid) return res.json({ success: false, error: 'Current password is incorrect' });
+
+  if (newPassword.length < 4) {
+    return res.json({ success: false, error: 'New password must be at least 4 characters' });
+  }
+
+  user.password = await bcrypt.hash(newPassword, 10);
+  saveDB(db);
+
+  res.json({ success: true, message: 'Password changed successfully!' });
+});
+
 // ==========================================
 // STUDENT FORM PAGE (unique link per session)
 // ==========================================
