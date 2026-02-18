@@ -17,6 +17,11 @@ const PORT = process.env.PORT || 3000;
 // COLLEGE CONFIG
 // ==========================================
 const ALLOWED_EMAIL_DOMAIN = 'nitjsr.ac.in';
+const crypto = require('crypto');
+
+function generateSessionCode() {
+  return crypto.randomBytes(4).toString('hex'); // 8-char hex code
+}
 
 // Parse roll info from email like "2046ugcm300@nitjsr.ac.in"
 function parseRollInfo(email) {
@@ -237,18 +242,36 @@ app.post('/api/reset-password', async (req, res) => {
 });
 
 // ==========================================
-// STUDENT FORM PAGE
+// STUDENT FORM PAGE (unique link per session)
 // ==========================================
 app.get('/', (req, res) => {
+  // Root shows a generic landing page
   const activeSession = db.sessions.find(s => s.active);
-  res.send(getStudentFormHTML(activeSession));
+  if (activeSession && activeSession.code) {
+    // Redirect to the unique session URL
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || `http://${getLocalIP()}:${PORT}`;
+    return res.redirect(`/s/${activeSession.code}`);
+  }
+  res.send(getStudentFormHTML(null));
+});
+
+app.get('/s/:code', (req, res) => {
+  const { code } = req.params;
+  const session = db.sessions.find(s => s.code === code);
+  if (!session) {
+    return res.send(getStudentFormHTML(null, 'Invalid or expired session link.'));
+  }
+  if (!session.active) {
+    return res.send(getStudentFormHTML(null, 'This session has ended.'));
+  }
+  res.send(getStudentFormHTML(session));
 });
 
 // ==========================================
 // STUDENT SUBMISSION
 // ==========================================
 app.post('/submit', (req, res) => {
-  const { email, name } = req.body;
+  const { email, name, sessionCode } = req.body;
 
   if (!email || !name) {
     return res.json({ success: false, error: 'Email and name are required' });
@@ -264,9 +287,15 @@ app.post('/submit', (req, res) => {
     });
   }
 
-  const activeSession = db.sessions.find(s => s.active);
+  // Find session by code, or fall back to active session
+  let activeSession;
+  if (sessionCode) {
+    activeSession = db.sessions.find(s => s.code === sessionCode && s.active);
+  } else {
+    activeSession = db.sessions.find(s => s.active);
+  }
   if (!activeSession) {
-    return res.json({ success: false, error: 'No active session. Please wait for your teacher to start one.' });
+    return res.json({ success: false, error: 'No active session. The link may have expired.' });
   }
 
   // Check duplicate
@@ -310,9 +339,11 @@ app.post('/api/start-session', (req, res) => {
   db.sessions.forEach(s => { s.active = false; });
 
   const id = Date.now();
+  const code = generateSessionCode();
   db.sessions.push({
     id: id,
     name: sessionName.trim(),
+    code: code,
     createdAt: new Date().toISOString(),
     active: true,
   });
@@ -323,7 +354,7 @@ app.post('/api/start-session', (req, res) => {
     success: true,
     sessionId: id,
     sessionName: sessionName.trim(),
-    formUrl: baseUrl,
+    formUrl: `${baseUrl}/s/${code}`,
   });
 });
 
@@ -464,9 +495,10 @@ function getLocalIP() {
 // STUDENT FORM HTML — with Google-style email picker
 // ==========================================
 
-function getStudentFormHTML(session) {
+function getStudentFormHTML(session, errorMsg) {
   const isActive = session && session.active;
   const sessionName = isActive ? session.name : '';
+  const sessionCode = isActive ? (session.code || '') : '';
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -618,7 +650,8 @@ function getStudentFormHTML(session) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               email: emailVal,
-              name: document.getElementById('fullname').value.trim()
+              name: document.getElementById('fullname').value.trim(),
+              sessionCode: '${sessionCode}'
             })
           })
           .then(function(r) { return r.json(); })
@@ -649,6 +682,7 @@ function getStudentFormHTML(session) {
       <div class="closed">
         <div style="font-size:56px;margin-bottom:16px;">⏳</div>
         <h1 style="color:#f1f5f9; margin-bottom:16px;">Attendance — NIT Jamshedpur</h1>
+        ${errorMsg ? `<p style="color:#f59e0b;font-size:16px;margin-bottom:12px;">${escapeHtml(errorMsg)}</p>` : ''}
         No active session right now.<br>
         Wait for your teacher to start one.
       </div>
