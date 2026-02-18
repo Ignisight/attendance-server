@@ -415,6 +415,71 @@ app.get('/api/history', (req, res) => {
   res.json({ success: true, sessions: sessions.reverse() });
 });
 
+// Delete single session
+app.delete('/api/sessions/:id', (req, res) => {
+  const id = parseInt(req.params.id);
+  db.sessions = db.sessions.filter(s => s.id !== id);
+  db.attendance = db.attendance.filter(a => a.sessionId !== id);
+  saveDB(db);
+  res.json({ success: true });
+});
+
+// Delete multiple sessions
+app.post('/api/sessions/delete-many', (req, res) => {
+  const { ids } = req.body;
+  if (!ids || !Array.isArray(ids)) {
+    return res.json({ success: false, error: 'ids array required' });
+  }
+  db.sessions = db.sessions.filter(s => !ids.includes(s.id));
+  db.attendance = db.attendance.filter(a => !ids.includes(a.sessionId));
+  saveDB(db);
+  res.json({ success: true, deleted: ids.length });
+});
+
+// Clear all sessions
+app.post('/api/sessions/clear-all', (req, res) => {
+  const count = db.sessions.length;
+  db.sessions = [];
+  db.attendance = [];
+  saveDB(db);
+  res.json({ success: true, deleted: count });
+});
+
+// Export multiple sessions
+app.get('/api/export-multi', (req, res) => {
+  const { ids } = req.query;
+  let sessionIds = [];
+  if (ids) sessionIds = ids.split(',').map(Number);
+
+  let rows = sessionIds.length > 0
+    ? db.attendance.filter(a => sessionIds.includes(a.sessionId))
+    : db.attendance;
+
+  const excelData = rows.map(r => {
+    const session = db.sessions.find(s => s.id === r.sessionId);
+    return {
+      'Email': r.email, 'Name': r.name, 'Roll Number': r.rollNumber,
+      'Year': r.year || '-', 'Program': r.program || '-', 'Branch': r.branch || '-',
+      'Roll No': r.rollNo || '-', 'Session': session ? session.name : 'Unknown',
+      'Date': r.date, 'Time': r.time,
+    };
+  });
+
+  const wb = XLSX.utils.book_new();
+  if (excelData.length === 0) {
+    const ws = XLSX.utils.aoa_to_sheet([['Email', 'Name', 'Roll Number', 'Year', 'Program', 'Branch', 'Roll No', 'Session', 'Date', 'Time']]);
+    XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
+  } else {
+    const ws = XLSX.utils.json_to_sheet(excelData);
+    ws['!cols'] = [{ wch: 30 }, { wch: 25 }, { wch: 18 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 8 }, { wch: 35 }, { wch: 14 }, { wch: 10 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
+  }
+  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="Attendance_Export.xlsx"');
+  res.send(Buffer.from(buffer));
+});
+
 // Export as Excel
 app.get('/api/export', (req, res) => {
   const { sessionName } = req.query;
