@@ -360,7 +360,13 @@ app.post('/api/start-session', (req, res) => {
 });
 
 app.post('/api/stop-session', (req, res) => {
-  db.sessions.forEach(s => { s.active = false; });
+  const now = new Date().toISOString();
+  db.sessions.forEach(s => {
+    if (s.active) {
+      s.active = false;
+      s.stoppedAt = now;
+    }
+  });
   saveDB(db);
   res.json({ success: true, message: 'Session stopped' });
 });
@@ -410,6 +416,7 @@ app.get('/api/history', (req, res) => {
     id: s.id,
     name: s.name,
     createdAt: s.createdAt,
+    stoppedAt: s.stoppedAt || null,
     active: s.active,
     responseCount: db.attendance.filter(a => a.sessionId === s.id).length,
   }));
