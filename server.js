@@ -11,6 +11,11 @@ const XLSX = require('xlsx');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const localtunnel = require('localtunnel');
+const multer = require('multer');
+const Jimp = require('jimp');
+const jsQR = require('jsqr');
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -387,6 +392,30 @@ app.post('/api/student/login', (req, res) => {
   saveDB(db);
 
   res.json({ success: true, message: 'Device securely registered!' });
+});
+
+app.post('/api/student/decode-qr', upload.single('qrimage'), async (req, res) => {
+  if (!req.file) {
+    return res.json({ success: false, error: 'No image uploaded.' });
+  }
+
+  try {
+    const image = await Jimp.read(req.file.buffer);
+    const width = image.bitmap.width;
+    const height = image.bitmap.height;
+    const imageData = new Uint8ClampedArray(image.bitmap.data);
+
+    const code = jsQR(imageData, width, height);
+
+    if (code && code.data) {
+      return res.json({ success: true, data: code.data });
+    } else {
+      return res.json({ success: false, error: 'No QR code found in the image.' });
+    }
+  } catch (error) {
+    console.error(error);
+    return res.json({ success: false, error: 'Failed to process image file on server.' });
+  }
 });
 
 app.post('/api/student/submit', (req, res) => {
