@@ -962,7 +962,7 @@ function getStudentFormHTML(session, errorMsg) {
                         },
                         function(err) {
                             btn.textContent = '⚠️ Location Required';
-                            showError('Location permission is required. Please allow access.');
+                            showError('Location blocked by your scanner app!<br><br>You <b>MUST</b> open this in Chrome/Safari to allow location.<br><br><button type="button" onclick="navigator.clipboard.writeText(window.location.href); alert(\'Link copied! Now open Chrome, Safari, or your main web browser and paste it in the top bar.\')" style="background:#ef4444; color:white; padding:10px; border:none; border-radius:8px; cursor:pointer; width:100%; font-weight:bold; font-size:14px; margin-top:5px;">📋 Copy Link to Open in Browser</button>');
                         },
                         { enableHighAccuracy: true, timeout: 10000 }
                     );
@@ -1035,7 +1035,7 @@ function getStudentFormHTML(session, errorMsg) {
 
         function showError(msg) {
           var errDiv = document.getElementById('error');
-          errDiv.textContent = msg;
+          errDiv.innerHTML = msg;
           errDiv.style.display = 'block';
         }
         function hideError() {
