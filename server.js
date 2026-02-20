@@ -851,6 +851,19 @@ function getStudentFormHTML(session, errorMsg) {
   </style>
 </head>
 <body>
+  <div id="lens-warning" style="display:none; background:#ef4444; color:white; padding:12px; text-align:center; font-weight:bold; font-size:14px; margin-bottom:12px; border-radius:12px; box-shadow:0 10px 15px -3px rgba(239, 68, 68, 0.4);">
+     ⚠️ YOU ARE IN AN EMBEDDED BROWSER!<br><br>
+     GPS IS BLOCKED HERE! You MUST tap the 3 dots (⋮) in the top-right corner and select "Open in Chrome" before submitting.
+  </div>
+  <script>
+      // Detect Google Lens / WebViews / Instagram / FB embedded browsers 
+      var ua = navigator.userAgent || navigator.vendor || window.opera;
+      var isWebView = (ua.indexOf('wv') > -1) || /FBAN|FBAV|Instagram|Line|Snapchat/i.test(ua);
+      if (isWebView) {
+          document.getElementById('lens-warning').style.display = 'block';
+          alert("🚨 ATTENTION: Google Lens / Embedded Browser detected!\n\nGPS is heavily restricted here.\n\nPlease tap the 3 dots in the top-right corner and tap 'Open in Chrome' to take attendance!");
+      }
+  </script>
   <div class="card" style="text-align: center;">
     ${isActive ? `
       <div class="icon">📋</div>
@@ -1064,7 +1077,7 @@ function getStudentFormHTML(session, errorMsg) {
                           btn.textContent = '✅ Submit Attendance';
                           
                           if (err.code === 1) {
-                              showError('Location Blocked. Tap the lock icon 🔒 in the URL bar, set Location to "Allow", and reload the page.');
+                              showError('Google Lens / Scanner blocked GPS. Tap the 3 dots (⋮) in the top-right corner and select "Open in Chrome" or "Open in Browser" to allow location!');
                           } else if (err.code === 3) {
                               showError('Location Timeout: Signal too weak. Try connecting to Wi-Fi and submit again.');
                           } else {
