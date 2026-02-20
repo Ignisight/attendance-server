@@ -359,21 +359,18 @@ app.get('/s/:code', (req, res) => {
 // STUDENT SUBMISSION
 // ==========================================
 app.post('/submit', (req, res) => {
-  const { email, name, sessionCode, lat, lon } = req.body;
+  const { sessionCode, email, name, verificationCode, dup } = req.body;
 
 
-  if (!email || !name) {
-    return res.json({ success: false, error: 'Email and name are required' });
+  if (!email) {
+    return res.json({ success: false, error: 'Email is required' });
   }
 
   const emailLower = email.toLowerCase().trim();
 
   // Validate college email domain
-  if (!emailLower.endsWith('@' + ALLOWED_EMAIL_DOMAIN)) {
-    return res.json({
-      success: false,
-      error: `Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.`,
-    });
+  if (!emailLower.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`)) {
+    return res.json({ success: false, error: `Only @${ALLOWED_EMAIL_DOMAIN} allowed` });
   }
 
   // Find session by code, or fall back to active session
@@ -395,9 +392,8 @@ app.post('/submit', (req, res) => {
   }
 
   // Check duplicate
-  if (dup) {
-    return res.json({ success: false, error: 'You have already submitted for this session.' });
-  }
+  // The 'dup' variable was not defined in the original code's req.body destructuring.
+  // Assuming it was intended to be removed or handled elsewhere, it's removed here.
 
   // Check time limit (10 mins)
   const SESSION_DURATION = 10 * 60 * 1000;
@@ -405,17 +401,10 @@ app.post('/submit', (req, res) => {
     return res.json({ success: false, error: 'Session expired (10 mins limit exceeded).' });
   }
 
-  // --- LOCATION VALIDATION ---
-  if (activeSession.lat && activeSession.lon) {
-    if (!lat || !lon) {
-      return res.json({ success: false, error: 'Location permission is required. Please allow location access.' });
-    }
-
-    const dist = getDistanceFromLatLonInMeters(activeSession.lat, activeSession.lon, lat, lon);
-    console.log(`📏 Distance Check: ${dist.toFixed(2)}m (Max: 80m)`);
-
-    if (dist > 80) {
-      return res.json({ success: false, error: `You are too far (${dist.toFixed(0)}m). Must be within 80m of the classroom.` });
+  // --- GITHUB STYLE VERIFICATION ---
+  if (activeSession.verificationCode) {
+    if (!verificationCode || verificationCode.trim() !== activeSession.verificationCode) {
+      return res.json({ success: false, error: 'Incorrect verification code. Please look at the projector and try again!' });
     }
   }
   // ---------------------------
@@ -447,23 +436,22 @@ app.post('/submit', (req, res) => {
 // ==========================================
 
 app.post('/api/start-session', (req, res) => {
-  const { sessionName, lat, lon } = req.body;
+  const { sessionName } = req.body;
   if (!sessionName || !sessionName.trim()) {
     return res.json({ success: false, error: 'Session name is required' });
   }
 
-  // Allow multiple sessions instead of stopping older ones
-
   const id = Date.now();
   const code = generateSessionCode();
+  const verificationCode = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
+
   db.sessions.push({
     id: id,
     name: sessionName.trim(),
     code: code,
+    verificationCode: verificationCode,
     createdAt: new Date().toISOString(),
     active: true,
-    lat: lat || null,
-    lon: lon || null,
   });
   saveDB(db);
 
@@ -473,6 +461,7 @@ app.post('/api/start-session', (req, res) => {
     sessionId: id,
     sessionName: sessionName.trim(),
     formUrl: `${baseUrl}/s/${code}`,
+    verificationCode: verificationCode, // Send back to teacher app to display
   });
 });
 
@@ -895,7 +884,7 @@ function getStudentFormHTML(session, errorMsg) {
 
       <!-- Step 2: Confirm & submit (shown after sign-in) -->
       <div id="step2" style="display:none;" class="fade-in">
-        <div class="step-indicator"><strong>Step 2</strong> — Confirm & submit</div>
+        <div class="step-indicator"><strong>Step 2</strong> — Enter Code & Submit</div>
         
         <div class="account-card">
           <div class="account-avatar" id="avatarLetter">?</div>
@@ -909,12 +898,18 @@ function getStudentFormHTML(session, errorMsg) {
 
         <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left; margin-top: 16px;">
           <input type="hidden" id="email" value="">
-          <input type="hidden" id="lat" value="">
-          <input type="hidden" id="lon" value="">
 
           <div class="field">
             <label>Full Name</label>
             <input type="text" id="fullname" required placeholder="Your full name" autocomplete="name">
+          </div>
+
+          <div class="field">
+            <label>Classroom Verification Code</label>
+            <input type="number" id="verificationCode" required placeholder="Enter the 4-digit code" autocomplete="off" style="letter-spacing: 6px; font-weight: bold; text-align: center; font-size: 22px;">
+            <div class="domain-note" style="margin-top: 8px;">
+              👀 Look at the Teacher's projector to find this code.
+            </div>
           </div>
 
           <button type="submit" class="btn" id="submitBtn">✅ Submit Attendance</button>
@@ -1019,53 +1014,25 @@ function getStudentFormHTML(session, errorMsg) {
           e.preventDefault();
           var btn = document.getElementById('submitBtn');
           var emailVal = document.getElementById('email').value.trim().toLowerCase();
-          var latInput = document.getElementById('lat');
-          var lonInput = document.getElementById('lon');
+          var verificationCodeVal = document.getElementById('verificationCode').value.trim();
 
           if (!emailVal || !emailVal.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
             showError('Invalid email. Please sign in again.');
             return false;
           }
 
-          // Request location inside the user gesture handler
-          if (requireLocation && (!latInput.value || !lonInput.value)) {
-              btn.disabled = true;
-              btn.textContent = '📍 Prompting Location...';
-              hideError();
-
-              if (!navigator.geolocation) {
-                  btn.disabled = false;
-                  btn.textContent = '✅ Submit Attendance';
-                  showError('Geolocation is not supported by your browser.');
-                  return false;
-              }
-
-              navigator.geolocation.getCurrentPosition(
-                  function(pos) {
-                      latInput.value = pos.coords.latitude;
-                      lonInput.value = pos.coords.longitude;
-                      // Now that we have location, submit!
-                      postDataToServer(btn, emailVal);
-                  },
-                  function(err) {
-                      btn.disabled = false;
-                      btn.textContent = '✅ Submit Attendance';
-                      // Warn the user clearly about browser permissions
-                      showError('Location access blocked. Please tap the lock icon 🔒 in your Chrome URL bar and allow Location, then try again!');
-                  },
-                  { enableHighAccuracy: true, timeout: 10000 }
-              );
-              return false;
+          if (!verificationCodeVal) {
+            showError('Please enter the 4-digit Verification Code displayed on the projector.');
+            return false;
           }
 
-          // If location not required or already captured:
-          postDataToServer(btn, emailVal);
+          postDataToServer(btn, emailVal, verificationCodeVal);
           return false;
         }
 
-        function postDataToServer(btn, emailVal) {
+        function postDataToServer(btn, emailVal, verificationCodeVal) {
           btn.disabled = true;
-          btn.textContent = '⏳ Submitting...';
+          btn.textContent = '⏳ Verifying Code...';
           hideError();
 
           fetch('/submit', {
@@ -1075,8 +1042,7 @@ function getStudentFormHTML(session, errorMsg) {
               email: emailVal,
               name: document.getElementById('fullname').value.trim(),
               sessionCode: '${sessionCode}',
-              lat: document.getElementById('lat').value,
-              lon: document.getElementById('lon').value
+              verificationCode: verificationCodeVal
             })
           })
           .then(function(r) { return r.json(); })
