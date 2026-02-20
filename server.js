@@ -1119,18 +1119,8 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`  ║  Local:    http://localhost:${PORT}           ║`);
   console.log(`  ║  Network:  http://${ip}:${PORT}      ║`);
 
-  try {
-    const tunnel = await localtunnel({ port: PORT });
-    console.log(`  ║  Internet: ${tunnel.url} ║`);
-
-    // Set for QR code generation dynamically
-    process.env.RENDER_EXTERNAL_URL = tunnel.url;
-
-    tunnel.on('close', () => {
-      console.log('  ║  Tunnel Closed.                            ║');
-    });
-  } catch (err) {
-    console.log('  ║  Internet: Tunnel Failed to Start          ║');
+  if (!process.env.RENDER_EXTERNAL_URL) {
+    process.env.RENDER_EXTERNAL_URL = 'https://attendance-server-ddgs.onrender.com';
   }
 
   console.log('  ╠════════════════════════════════════════════╣');
