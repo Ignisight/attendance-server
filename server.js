@@ -1040,27 +1040,42 @@ function getStudentFormHTML(session, errorMsg) {
                   return false;
               }
 
-              navigator.geolocation.getCurrentPosition(
-                  function(pos) {
-                      latInput.value = pos.coords.latitude;
-                      lonInput.value = pos.coords.longitude;
-                      // Now that we have location, submit!
-                      postDataToServer(btn, emailVal);
-                  },
-                  function(err) {
-                      btn.disabled = false;
-                      btn.textContent = '✅ Submit Attendance';
-                      // Warn the user clearly about specific browser permissions
-                      if (err.code === 1) {
-                          showError('Location Blocked by Browser. Tap the lock icon 🔒 in the URL bar, set Location to "Allow", and reload the page.');
-                      } else if (err.code === 3) {
-                          showError('Location Timeout: Poor GPS signal. Step near a window and try again.');
-                      } else {
-                          showError('Location Error (' + err.code + '): ' + err.message);
-                      }
-                  },
-                  { enableHighAccuracy: true, timeout: 15000 }
-              );
+              var locOptions = { enableHighAccuracy: true, maximumAge: 0, timeout: 8000 };
+
+              function getPosition() {
+                  navigator.geolocation.getCurrentPosition(
+                      function(pos) {
+                          latInput.value = pos.coords.latitude;
+                          lonInput.value = pos.coords.longitude;
+                          // Now that we have location, submit!
+                          postDataToServer(btn, emailVal);
+                      },
+                      function(err) {
+                          if (err.code === 3 && locOptions.enableHighAccuracy) {
+                              // If High Accuracy timed out, immediately retry with Low Accuracy (Wi-Fi/Cellular)
+                              btn.textContent = '📍 Retrying without GPS...';
+                              locOptions.enableHighAccuracy = false;
+                              locOptions.timeout = 10000;
+                              getPosition();
+                              return;
+                          }
+                          
+                          btn.disabled = false;
+                          btn.textContent = '✅ Submit Attendance';
+                          
+                          if (err.code === 1) {
+                              showError('Location Blocked. Tap the lock icon 🔒 in the URL bar, set Location to "Allow", and reload the page.');
+                          } else if (err.code === 3) {
+                              showError('Location Timeout: Signal too weak. Try connecting to Wi-Fi and submit again.');
+                          } else {
+                              showError('Location Error (' + err.code + '): ' + err.message);
+                          }
+                      },
+                      locOptions
+                  );
+              }
+              
+              getPosition();
               return false;
           }
 
