@@ -462,8 +462,8 @@ app.post('/api/start-session', (req, res) => {
     code: code,
     createdAt: new Date().toISOString(),
     active: true,
-    lat: lat || null,
-    lon: lon || null,
+    lat: null, // Location temporarily disabled due to device blocking
+    lon: null, // Location temporarily disabled due to device blocking
   });
   saveDB(db);
 
