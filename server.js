@@ -942,35 +942,8 @@ function getStudentFormHTML(session, errorMsg) {
              // We will try to fetch it when they reach step 2, or eagerly
         }
 
-        function checkLocation() {
-            if (!requireLocation) return;
-            var btn = document.getElementById('submitBtn');
-            var latInput = document.getElementById('lat');
-            var lonInput = document.getElementById('lon');
-
-            if (!latInput.value) {
-                btn.disabled = true;
-                btn.textContent = '📍 Getting Location...';
-                
-                if (navigator.geolocation) {
-                    navigator.geolocation.getCurrentPosition(
-                        function(pos) {
-                            latInput.value = pos.coords.latitude;
-                            lonInput.value = pos.coords.longitude;
-                            btn.disabled = false;
-                            btn.textContent = '✅ Submit Attendance';
-                        },
-                        function(err) {
-                            btn.textContent = '⚠️ Location Required';
-                            showError('Location blocked by your scanner app!<br><br>You <b>MUST</b> open this in Chrome/Safari to allow location.<br><br><button type="button" onclick="navigator.clipboard.writeText(window.location.href); alert(\'Link copied! Now open Chrome, Safari, or your main web browser and paste it in the top bar.\')" style="background:#ef4444; color:white; padding:10px; border:none; border-radius:8px; cursor:pointer; width:100%; font-weight:bold; font-size:14px; margin-top:5px;">📋 Copy Link to Open in Browser</button>');
-                        },
-                        { enableHighAccuracy: true, timeout: 10000 }
-                    );
-                } else {
-                    showError('Geolocation is not supported by this browser.');
-                }
-            }
-        }
+        // We wait for user gesture (hitting Submit) to request location 
+        // to prevent Chrome mobile from blocking the non-user-triggered popup.
 
         // Google Sign-In callback
         function handleGoogleResponse(response) {
@@ -1020,9 +993,8 @@ function getStudentFormHTML(session, errorMsg) {
           // Switch to step 2
           document.getElementById('step1').style.display = 'none';
           document.getElementById('step2').style.display = 'block';
-          document.getElementById('step2').style.display = 'block';
           hideError();
-          if (requireLocation) checkLocation();
+          // Location will be requested ONLY when the user clicks submit
         }
 
         function changeAccount() {
@@ -1035,7 +1007,7 @@ function getStudentFormHTML(session, errorMsg) {
 
         function showError(msg) {
           var errDiv = document.getElementById('error');
-          errDiv.innerHTML = msg;
+          errDiv.textContent = msg;
           errDiv.style.display = 'block';
         }
         function hideError() {
@@ -1047,12 +1019,51 @@ function getStudentFormHTML(session, errorMsg) {
           e.preventDefault();
           var btn = document.getElementById('submitBtn');
           var emailVal = document.getElementById('email').value.trim().toLowerCase();
+          var latInput = document.getElementById('lat');
+          var lonInput = document.getElementById('lon');
 
           if (!emailVal || !emailVal.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
             showError('Invalid email. Please sign in again.');
             return false;
           }
 
+          // Request location inside the user gesture handler
+          if (requireLocation && (!latInput.value || !lonInput.value)) {
+              btn.disabled = true;
+              btn.textContent = '📍 Prompting Location...';
+              hideError();
+
+              if (!navigator.geolocation) {
+                  btn.disabled = false;
+                  btn.textContent = '✅ Submit Attendance';
+                  showError('Geolocation is not supported by your browser.');
+                  return false;
+              }
+
+              navigator.geolocation.getCurrentPosition(
+                  function(pos) {
+                      latInput.value = pos.coords.latitude;
+                      lonInput.value = pos.coords.longitude;
+                      // Now that we have location, submit!
+                      postDataToServer(btn, emailVal);
+                  },
+                  function(err) {
+                      btn.disabled = false;
+                      btn.textContent = '✅ Submit Attendance';
+                      // Warn the user clearly about browser permissions
+                      showError('Location access blocked. Please tap the lock icon 🔒 in your Chrome URL bar and allow Location, then try again!');
+                  },
+                  { enableHighAccuracy: true, timeout: 10000 }
+              );
+              return false;
+          }
+
+          // If location not required or already captured:
+          postDataToServer(btn, emailVal);
+          return false;
+        }
+
+        function postDataToServer(btn, emailVal) {
           btn.disabled = true;
           btn.textContent = '⏳ Submitting...';
           hideError();
@@ -1086,7 +1097,6 @@ function getStudentFormHTML(session, errorMsg) {
             btn.disabled = false;
             btn.textContent = '✅ Submit Attendance';
           });
-          return false;
         }
       </script>
     ` : `
