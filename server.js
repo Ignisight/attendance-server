@@ -359,18 +359,21 @@ app.get('/s/:code', (req, res) => {
 // STUDENT SUBMISSION
 // ==========================================
 app.post('/submit', (req, res) => {
-  const { sessionCode, email, name, verificationCode, dup } = req.body;
+  const { email, name, sessionCode, lat, lon } = req.body;
 
 
-  if (!email) {
-    return res.json({ success: false, error: 'Email is required' });
+  if (!email || !name) {
+    return res.json({ success: false, error: 'Email and name are required' });
   }
 
   const emailLower = email.toLowerCase().trim();
 
   // Validate college email domain
-  if (!emailLower.endsWith(`@${ALLOWED_EMAIL_DOMAIN}`)) {
-    return res.json({ success: false, error: `Only @${ALLOWED_EMAIL_DOMAIN} allowed` });
+  if (!emailLower.endsWith('@' + ALLOWED_EMAIL_DOMAIN)) {
+    return res.json({
+      success: false,
+      error: `Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.`,
+    });
   }
 
   // Find session by code, or fall back to active session
@@ -392,8 +395,9 @@ app.post('/submit', (req, res) => {
   }
 
   // Check duplicate
-  // The 'dup' variable was not defined in the original code's req.body destructuring.
-  // Assuming it was intended to be removed or handled elsewhere, it's removed here.
+  if (dup) {
+    return res.json({ success: false, error: 'You have already submitted for this session.' });
+  }
 
   // Check time limit (10 mins)
   const SESSION_DURATION = 10 * 60 * 1000;
@@ -401,10 +405,17 @@ app.post('/submit', (req, res) => {
     return res.json({ success: false, error: 'Session expired (10 mins limit exceeded).' });
   }
 
-  // --- GITHUB STYLE VERIFICATION ---
-  if (activeSession.verificationCode) {
-    if (!verificationCode || verificationCode.trim() !== activeSession.verificationCode) {
-      return res.json({ success: false, error: 'Incorrect verification code. Please look at the projector and try again!' });
+  // --- LOCATION VALIDATION ---
+  if (activeSession.lat && activeSession.lon) {
+    if (!lat || !lon) {
+      return res.json({ success: false, error: 'Location permission is required. Please allow location access.' });
+    }
+
+    const dist = getDistanceFromLatLonInMeters(activeSession.lat, activeSession.lon, lat, lon);
+    console.log(`📏 Distance Check: ${dist.toFixed(2)}m (Max: 80m)`);
+
+    if (dist > 80) {
+      return res.json({ success: false, error: `You are too far (${dist.toFixed(0)}m). Must be within 80m of the classroom.` });
     }
   }
   // ---------------------------
@@ -436,22 +447,23 @@ app.post('/submit', (req, res) => {
 // ==========================================
 
 app.post('/api/start-session', (req, res) => {
-  const { sessionName } = req.body;
+  const { sessionName, lat, lon } = req.body;
   if (!sessionName || !sessionName.trim()) {
     return res.json({ success: false, error: 'Session name is required' });
   }
 
+  // Allow multiple sessions instead of stopping older ones
+
   const id = Date.now();
   const code = generateSessionCode();
-  const verificationCode = Math.floor(1000 + Math.random() * 9000).toString(); // 4-digit OTP
-
   db.sessions.push({
     id: id,
     name: sessionName.trim(),
     code: code,
-    verificationCode: verificationCode,
     createdAt: new Date().toISOString(),
     active: true,
+    lat: lat || null,
+    lon: lon || null,
   });
   saveDB(db);
 
@@ -461,7 +473,6 @@ app.post('/api/start-session', (req, res) => {
     sessionId: id,
     sessionName: sessionName.trim(),
     formUrl: `${baseUrl}/s/${code}`,
-    verificationCode: verificationCode, // Send back to teacher app to display
   });
 });
 
@@ -884,7 +895,7 @@ function getStudentFormHTML(session, errorMsg) {
 
       <!-- Step 2: Confirm & submit (shown after sign-in) -->
       <div id="step2" style="display:none;" class="fade-in">
-        <div class="step-indicator"><strong>Step 2</strong> — Enter Code & Submit</div>
+        <div class="step-indicator"><strong>Step 2</strong> — Confirm & submit</div>
         
         <div class="account-card">
           <div class="account-avatar" id="avatarLetter">?</div>
@@ -898,18 +909,12 @@ function getStudentFormHTML(session, errorMsg) {
 
         <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left; margin-top: 16px;">
           <input type="hidden" id="email" value="">
+          <input type="hidden" id="lat" value="">
+          <input type="hidden" id="lon" value="">
 
           <div class="field">
             <label>Full Name</label>
             <input type="text" id="fullname" required placeholder="Your full name" autocomplete="name">
-          </div>
-
-          <div class="field">
-            <label>Classroom Verification Code</label>
-            <input type="number" id="verificationCode" required placeholder="Enter the 4-digit code" autocomplete="off" style="letter-spacing: 6px; font-weight: bold; text-align: center; font-size: 22px;">
-            <div class="domain-note" style="margin-top: 8px;">
-              👀 Look at the Teacher's projector to find this code.
-            </div>
           </div>
 
           <button type="submit" class="btn" id="submitBtn">✅ Submit Attendance</button>
@@ -1014,25 +1019,59 @@ function getStudentFormHTML(session, errorMsg) {
           e.preventDefault();
           var btn = document.getElementById('submitBtn');
           var emailVal = document.getElementById('email').value.trim().toLowerCase();
-          var verificationCodeVal = document.getElementById('verificationCode').value.trim();
+          var latInput = document.getElementById('lat');
+          var lonInput = document.getElementById('lon');
 
           if (!emailVal || !emailVal.endsWith('@${ALLOWED_EMAIL_DOMAIN}')) {
             showError('Invalid email. Please sign in again.');
             return false;
           }
 
-          if (!verificationCodeVal) {
-            showError('Please enter the 4-digit Verification Code displayed on the projector.');
-            return false;
+          // Request location inside the user gesture handler
+          if (requireLocation && (!latInput.value || !lonInput.value)) {
+              btn.disabled = true;
+              btn.textContent = '📍 Prompting Location...';
+              hideError();
+
+              if (!navigator.geolocation) {
+                  btn.disabled = false;
+                  btn.textContent = '✅ Submit Attendance';
+                  showError('Geolocation is not supported by your browser.');
+                  return false;
+              }
+
+              navigator.geolocation.getCurrentPosition(
+                  function(pos) {
+                      latInput.value = pos.coords.latitude;
+                      lonInput.value = pos.coords.longitude;
+                      // Now that we have location, submit!
+                      postDataToServer(btn, emailVal);
+                  },
+                  function(err) {
+                      btn.disabled = false;
+                      btn.textContent = '✅ Submit Attendance';
+                      // Warn the user clearly about specific browser permissions
+                      if (err.code === 1) {
+                          showError('Location Blocked by Browser. Tap the lock icon 🔒 in the URL bar, set Location to "Allow", and reload the page.');
+                      } else if (err.code === 3) {
+                          showError('Location Timeout: Poor GPS signal. Step near a window and try again.');
+                      } else {
+                          showError('Location Error (' + err.code + '): ' + err.message);
+                      }
+                  },
+                  { enableHighAccuracy: true, timeout: 15000 }
+              );
+              return false;
           }
 
-          postDataToServer(btn, emailVal, verificationCodeVal);
+          // If location not required or already captured:
+          postDataToServer(btn, emailVal);
           return false;
         }
 
-        function postDataToServer(btn, emailVal, verificationCodeVal) {
+        function postDataToServer(btn, emailVal) {
           btn.disabled = true;
-          btn.textContent = '⏳ Verifying Code...';
+          btn.textContent = '⏳ Submitting...';
           hideError();
 
           fetch('/submit', {
@@ -1042,7 +1081,8 @@ function getStudentFormHTML(session, errorMsg) {
               email: emailVal,
               name: document.getElementById('fullname').value.trim(),
               sessionCode: '${sessionCode}',
-              verificationCode: verificationCodeVal
+              lat: document.getElementById('lat').value,
+              lon: document.getElementById('lon').value
             })
           })
           .then(function(r) { return r.json(); })
