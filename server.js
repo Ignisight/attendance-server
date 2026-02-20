@@ -67,10 +67,11 @@ function loadDB() {
       if (!data.otps) data.otps = [];
       if (!data.sessions) data.sessions = [];
       if (!data.attendance) data.attendance = [];
+      if (!data.devices) data.devices = [];
       return data;
     }
   } catch (e) { /* ignore */ }
-  return { users: [], otps: [], sessions: [], attendance: [] };
+  return { users: [], otps: [], sessions: [], attendance: [], devices: [] };
 }
 
 function saveDB(data) {
@@ -356,7 +357,110 @@ app.get('/s/:code', (req, res) => {
 });
 
 // ==========================================
-// STUDENT SUBMISSION
+// STUDENT MOBILE V2 SUBMISSION
+// ==========================================
+
+app.post('/api/student/login', (req, res) => {
+  const { email, deviceId } = req.body;
+
+  if (!email || !deviceId) {
+    return res.json({ success: false, error: 'Email and deviceId are required' });
+  }
+
+  const emailLower = email.toLowerCase().trim();
+
+  if (!emailLower.endsWith('@' + ALLOWED_EMAIL_DOMAIN)) {
+    return res.json({ success: false, error: `Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.` });
+  }
+
+  // Enforcement: 1 Device = 1 Email
+  const existingDevice = db.devices.find(d => d.email === emailLower);
+  if (existingDevice) {
+    if (existingDevice.deviceId !== deviceId) {
+      return res.json({ success: false, error: 'This email is already registered strictly to another phone.' });
+    }
+    return res.json({ success: true, message: 'Welcome back!' });
+  }
+
+  // Register new device
+  db.devices.push({ email: emailLower, deviceId, registeredAt: new Date().toISOString() });
+  saveDB(db);
+
+  res.json({ success: true, message: 'Device securely registered!' });
+});
+
+app.post('/api/student/submit', (req, res) => {
+  const { email, deviceId, sessionCode, lat, lon } = req.body;
+
+  if (!email || !deviceId || !sessionCode) {
+    return res.json({ success: false, error: 'Missing required fields' });
+  }
+
+  const emailLower = email.toLowerCase().trim();
+
+  // Validate the spoof-proof binding
+  const existingDevice = db.devices.find(d => d.email === emailLower);
+  if (!existingDevice || existingDevice.deviceId !== deviceId) {
+    return res.json({ success: false, error: 'Unregistered device. Please sign in again.' });
+  }
+
+  // Find Session
+  const activeSession = db.sessions.find(s => s.code === sessionCode);
+  if (!activeSession) {
+    return res.json({ success: false, error: 'Invalid or expired session QR.' });
+  }
+  if (activeSession.stoppedAt) {
+    return res.json({ success: false, error: 'This session has ended. Attendance is closed.' });
+  }
+
+  // Check duplicate
+  const dup = db.attendance.find(a => a.sessionId === activeSession.id && a.email === emailLower);
+  if (dup) {
+    return res.json({ success: false, error: 'You have already submitted for this session.' });
+  }
+
+  // Check Expiry (10 min hard boundary)
+  if (Date.now() - activeSession.id > 10 * 60 * 1000) {
+    return res.json({ success: false, error: 'Session expired (10 mins limit exceeded).' });
+  }
+
+  // Location
+  if (activeSession.lat && activeSession.lon) {
+    if (!lat || !lon) {
+      return res.json({ success: false, error: 'Location permission completely blocked. Allow in settings.' });
+    }
+    const dist = getDistanceFromLatLonInMeters(activeSession.lat, activeSession.lon, lat, lon);
+    if (dist > 80) {
+      return res.json({ success: false, error: `You are too far (${dist.toFixed(0)}m). Must be within 80m of the classroom.` });
+    }
+  }
+
+  const rollInfo = parseRollInfo(emailLower);
+  const now = new Date();
+
+  // Use email prefix as temporary name if explicit name not given
+  const nameExtracted = emailLower.split('@')[0];
+
+  db.attendance.push({
+    sessionId: activeSession.id,
+    email: emailLower,
+    name: nameExtracted,
+    regNo: rollInfo.rollNumber,
+    year: rollInfo.year,
+    program: rollInfo.program,
+    branch: rollInfo.branch,
+    rollNo: rollInfo.rollNo,
+    submittedAt: now.toISOString(),
+    date: now.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }),
+    time: now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  });
+  saveDB(db);
+
+  res.json({ success: true, message: 'Attendance smoothly recorded!' });
+});
+
+// ==========================================
+// STUDENT WEB SUBMISSION (LEGACY/FALLBACK)
 // ==========================================
 app.post('/submit', (req, res) => {
   const { email, name, sessionCode, lat, lon } = req.body;
@@ -462,8 +566,8 @@ app.post('/api/start-session', (req, res) => {
     code: code,
     createdAt: new Date().toISOString(),
     active: true,
-    lat: null, // Location temporarily disabled due to device blocking
-    lon: null, // Location temporarily disabled due to device blocking
+    lat: lat || null,
+    lon: lon || null,
   });
   saveDB(db);
 
