@@ -9,6 +9,8 @@ const os = require('os');
 const fs = require('fs');
 const XLSX = require('xlsx');
 const bcrypt = require('bcryptjs');
+const nodemailer = require('nodemailer');
+const localtunnel = require('localtunnel');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -18,6 +20,17 @@ const PORT = process.env.PORT || 3000;
 // ==========================================
 const ALLOWED_EMAIL_DOMAIN = 'nitjsr.ac.in';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '188263362905-05e73in41h1ib970spt6q3meoidg2fte.apps.googleusercontent.com';
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: EMAIL_USER,
+    pass: EMAIL_PASS,
+  },
+});
+
 const crypto = require('crypto');
 
 function generateSessionCode() {
@@ -207,7 +220,37 @@ app.post('/api/forgot-password', (req, res) => {
 
   console.log(`\n  🔑 OTP for ${emailLower}: ${otp}\n`);
 
-  res.json({ success: true, message: 'OTP generated.', otp: otp });
+  if (!EMAIL_USER || !EMAIL_PASS) {
+    console.log('⚠️  Email credentials missing. OTP (console only):', otp);
+    return res.json({
+      success: false,
+      error: 'Email service not configured on server. Contact Admin.'
+    });
+  }
+
+  const mailOptions = {
+    from: `"Attendance System" <${EMAIL_USER}>`,
+    to: emailLower,
+    subject: 'Password Reset OTP - Attendance App',
+    text: `Your OTP for password reset is: ${otp}\n\nIt expires in 10 minutes.`,
+    html: `<div style="font-family: sans-serif; padding: 20px;">
+             <h2>Password Reset Request</h2>
+             <p>Your OTP is:</p>
+             <h1 style="color: #4f46e5; letter-spacing: 5px;">${otp}</h1>
+             <p>It expires in 10 minutes.</p>
+             <p style="color: #666; font-size: 12px;">If you didn't request this, ignore this email.</p>
+           </div>`
+  };
+
+  transporter.sendMail(mailOptions, (error, info) => {
+    if (error) {
+      console.error('Error sending email:', error);
+      return res.json({ success: false, error: 'Failed to send OTP email. Try again later.' });
+    }
+    console.log('Email sent: ' + info.response);
+    // DO NOT send OTP in response
+    res.json({ success: true, message: `OTP sent to ${emailLower}` });
+  });
 });
 
 app.post('/api/reset-password', async (req, res) => {
@@ -316,7 +359,8 @@ app.get('/s/:code', (req, res) => {
 // STUDENT SUBMISSION
 // ==========================================
 app.post('/submit', (req, res) => {
-  const { email, name, sessionCode } = req.body;
+  const { email, name, sessionCode, lat, lon } = req.body;
+
 
   if (!email || !name) {
     return res.json({ success: false, error: 'Email and name are required' });
@@ -351,10 +395,30 @@ app.post('/submit', (req, res) => {
   }
 
   // Check duplicate
-  const dup = db.attendance.find(a => a.sessionId === activeSession.id && a.email === emailLower);
   if (dup) {
     return res.json({ success: false, error: 'You have already submitted for this session.' });
   }
+
+  // Check time limit (10 mins)
+  const SESSION_DURATION = 10 * 60 * 1000;
+  if (Date.now() - activeSession.id > SESSION_DURATION) {
+    return res.json({ success: false, error: 'Session expired (10 mins limit exceeded).' });
+  }
+
+  // --- LOCATION VALIDATION ---
+  if (activeSession.lat && activeSession.lon) {
+    if (!lat || !lon) {
+      return res.json({ success: false, error: 'Location permission is required. Please allow location access.' });
+    }
+
+    const dist = getDistanceFromLatLonInMeters(activeSession.lat, activeSession.lon, lat, lon);
+    console.log(`📏 Distance Check: ${dist.toFixed(2)}m (Max: 80m)`);
+
+    if (dist > 80) {
+      return res.json({ success: false, error: `You are too far (${dist.toFixed(0)}m). Must be within 80m of the classroom.` });
+    }
+  }
+  // ---------------------------
 
   // Auto-parse roll info from email
   const rollInfo = parseRollInfo(emailLower);
@@ -370,8 +434,8 @@ app.post('/submit', (req, res) => {
     branch: rollInfo.branch,
     rollNo: rollInfo.rollNo,
     submittedAt: now.toISOString(),
-    date: now.toLocaleDateString('en-IN'),
-    time: now.toLocaleTimeString('en-IN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    date: now.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }),
+    time: now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
   });
   saveDB(db);
 
@@ -383,12 +447,12 @@ app.post('/submit', (req, res) => {
 // ==========================================
 
 app.post('/api/start-session', (req, res) => {
-  const { sessionName } = req.body;
+  const { sessionName, lat, lon } = req.body;
   if (!sessionName || !sessionName.trim()) {
     return res.json({ success: false, error: 'Session name is required' });
   }
 
-  db.sessions.forEach(s => { s.active = false; });
+  // Allow multiple sessions instead of stopping older ones
 
   const id = Date.now();
   const code = generateSessionCode();
@@ -398,6 +462,8 @@ app.post('/api/start-session', (req, res) => {
     code: code,
     createdAt: new Date().toISOString(),
     active: true,
+    lat: lat || null,
+    lon: lon || null,
   });
   saveDB(db);
 
@@ -644,6 +710,22 @@ app.get('/api/export', (req, res) => {
 // HELPERS
 // ==========================================
 
+function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; // Earth radius in meters
+  const dLat = deg2rad(lat2 - lat1);
+  const dLon = deg2rad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(deg2rad(lat1)) * Math.cos(deg2rad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function deg2rad(deg) {
+  return deg * (Math.PI / 180);
+}
+
 function getLocalIP() {
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
@@ -665,6 +747,7 @@ function getStudentFormHTML(session, errorMsg) {
   const sessionName = isActive ? session.name : '';
   const sessionCode = isActive ? (session.code || '') : '';
   const useGoogleSignIn = !!GOOGLE_CLIENT_ID;
+  const requireLocation = isActive && session && session.lat && session.lon;
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -826,6 +909,8 @@ function getStudentFormHTML(session, errorMsg) {
 
         <form id="attendanceForm" onsubmit="return submitForm(event)" style="text-align:left; margin-top: 16px;">
           <input type="hidden" id="email" value="">
+          <input type="hidden" id="lat" value="">
+          <input type="hidden" id="lon" value="">
 
           <div class="field">
             <label>Full Name</label>
@@ -849,6 +934,43 @@ function getStudentFormHTML(session, errorMsg) {
       <script>
         var selectedEmail = '';
         var selectedName = '';
+        var requireLocation = ${requireLocation};
+
+        if (requireLocation) {
+             const btn = document.getElementById('submitBtn');
+             // Initially disable if location required
+             // We will try to fetch it when they reach step 2, or eagerly
+        }
+
+        function checkLocation() {
+            if (!requireLocation) return;
+            var btn = document.getElementById('submitBtn');
+            var latInput = document.getElementById('lat');
+            var lonInput = document.getElementById('lon');
+
+            if (!latInput.value) {
+                btn.disabled = true;
+                btn.textContent = '📍 Getting Location...';
+                
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        function(pos) {
+                            latInput.value = pos.coords.latitude;
+                            lonInput.value = pos.coords.longitude;
+                            btn.disabled = false;
+                            btn.textContent = '✅ Submit Attendance';
+                        },
+                        function(err) {
+                            btn.textContent = '⚠️ Location Required';
+                            showError('Location permission is required. Please allow access.');
+                        },
+                        { enableHighAccuracy: true, timeout: 10000 }
+                    );
+                } else {
+                    showError('Geolocation is not supported by this browser.');
+                }
+            }
+        }
 
         // Google Sign-In callback
         function handleGoogleResponse(response) {
@@ -898,7 +1020,9 @@ function getStudentFormHTML(session, errorMsg) {
           // Switch to step 2
           document.getElementById('step1').style.display = 'none';
           document.getElementById('step2').style.display = 'block';
+          document.getElementById('step2').style.display = 'block';
           hideError();
+          if (requireLocation) checkLocation();
         }
 
         function changeAccount() {
@@ -939,7 +1063,9 @@ function getStudentFormHTML(session, errorMsg) {
             body: JSON.stringify({
               email: emailVal,
               name: document.getElementById('fullname').value.trim(),
-              sessionCode: '${sessionCode}'
+              sessionCode: '${sessionCode}',
+              lat: document.getElementById('lat').value,
+              lon: document.getElementById('lon').value
             })
           })
           .then(function(r) { return r.json(); })
@@ -984,7 +1110,7 @@ function escapeHtml(text) {
 // ==========================================
 // START SERVER
 // ==========================================
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, '0.0.0.0', async () => {
   const ip = getLocalIP();
   console.log('');
   console.log('  ╔════════════════════════════════════════════╗');
@@ -992,11 +1118,43 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log('  ╠════════════════════════════════════════════╣');
   console.log(`  ║  Local:    http://localhost:${PORT}           ║`);
   console.log(`  ║  Network:  http://${ip}:${PORT}      ║`);
+
+  try {
+    const tunnel = await localtunnel({ port: PORT });
+    console.log(`  ║  Internet: ${tunnel.url} ║`);
+
+    // Set for QR code generation dynamically
+    process.env.RENDER_EXTERNAL_URL = tunnel.url;
+
+    tunnel.on('close', () => {
+      console.log('  ║  Tunnel Closed.                            ║');
+    });
+  } catch (err) {
+    console.log('  ║  Internet: Tunnel Failed to Start          ║');
+  }
+
   console.log('  ╠════════════════════════════════════════════╣');
   console.log(`  ║  Email Domain: @${ALLOWED_EMAIL_DOMAIN}      ║`);
   console.log('  ║  Data Retention: 2 days                   ║');
   console.log(`  ║  Google Sign-In: ${GOOGLE_CLIENT_ID ? '✅ Enabled' : '❌ Not set'}        ║`);
   console.log('  ╚════════════════════════════════════════════╝');
   console.log('');
+
+  // Auto-close any session that exceeds 10 minutes
+  setInterval(() => {
+    let changed = false;
+    const nowMs = Date.now();
+    db.sessions.forEach(s => {
+      // s.id is the creation timestamp
+      if (s.active && (nowMs - s.id > 10 * 60 * 1000)) {
+        s.active = false;
+        // Strictly set stoppedAt to exactly 10 minutes from creation
+        s.stoppedAt = new Date(s.id + 10 * 60 * 1000).toISOString();
+        changed = true;
+      }
+    });
+    if (changed) saveDB(db);
+  }, 10000); // check every 10 seconds
+
 });
 
