@@ -12,7 +12,7 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const localtunnel = require('localtunnel');
 const multer = require('multer');
-const Jimp = require('jimp');
+const { Jimp } = require('jimp');
 const jsQR = require('jsqr');
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -102,11 +102,25 @@ cleanOldData();
 setInterval(cleanOldData, 60 * 60 * 1000); // Every hour
 
 // ==========================================
-// MIDDLEWARE
+// MIDDLEWARE (SECURITY & PARSERS)
 // ==========================================
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Secret Key verification middleware
+const APP_SECRET_KEY = process.env.APP_SECRET_KEY || 'attendance-system-v2-secure-key-2026';
+
+app.use((req, res, next) => {
+  // Only protect /api routes. Let web form endpoints like /s/ pass through
+  if (req.path.startsWith('/api/')) {
+    const clientKey = req.headers['x-app-secret'];
+    if (clientKey !== APP_SECRET_KEY) {
+      return res.status(403).json({ success: false, error: 'Access Denied: Unofficial Client. API is locked to the official app.' });
+    }
+  }
+  next();
+});
 
 // ==========================================
 // AUTH ENDPOINTS
@@ -378,13 +392,19 @@ app.post('/api/student/login', (req, res) => {
     return res.json({ success: false, error: `Only @${ALLOWED_EMAIL_DOMAIN} emails are allowed.` });
   }
 
-  // Enforcement: 1 Device = 1 Email
-  const existingDevice = db.devices.find(d => d.email === emailLower);
-  if (existingDevice) {
-    if (existingDevice.deviceId !== deviceId) {
+  // Enforcement: 1 Email = 1 Phone (Email already registered to another phone)
+  const existingEmailDevice = db.devices.find(d => d.email === emailLower);
+  if (existingEmailDevice) {
+    if (existingEmailDevice.deviceId !== deviceId) {
       return res.json({ success: false, error: 'This email is already registered strictly to another phone.' });
     }
     return res.json({ success: true, message: 'Welcome back!' });
+  }
+
+  // Enforcement: 1 Phone = 1 Email (Phone already registered to another email)
+  const existingPhoneUser = db.devices.find(d => d.deviceId === deviceId);
+  if (existingPhoneUser) {
+    return res.json({ success: false, error: `This phone is already bound to ${existingPhoneUser.email}. Using multiple emails on one phone is NOT allowed.` });
   }
 
   // Register new device
@@ -400,10 +420,9 @@ app.post('/api/student/decode-qr', upload.single('qrimage'), async (req, res) =>
   }
 
   try {
-    const image = await Jimp.read(req.file.buffer);
-    const width = image.bitmap.width;
-    const height = image.bitmap.height;
-    const imageData = new Uint8ClampedArray(image.bitmap.data);
+    const image = await Jimp.fromBuffer(req.file.buffer);
+    const { width, height, data } = image.bitmap;
+    const imageData = new Uint8ClampedArray(data);
 
     const code = jsQR(imageData, width, height);
 
