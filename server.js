@@ -75,7 +75,7 @@ function getDistanceFromLatLonInMeters(lat1, lon1, lat2, lon2) {
 }
 
 // ==========================================
-// MONGOOSE CONNECTION (with retry)
+// MONGOOSE CONNECTION (background, non-blocking)
 // ==========================================
 const MONGO_URI = process.env.MONGO_URI;
 
@@ -84,29 +84,25 @@ if (!MONGO_URI) {
   process.exit(1);
 }
 
+let dbReady = false;
+
 async function connectDB() {
-  for (let attempt = 1; attempt <= 5; attempt++) {
+  for (let attempt = 1; attempt <= 10; attempt++) {
     try {
       await mongoose.connect(MONGO_URI, {
         serverSelectionTimeoutMS: 30000,
         connectTimeoutMS: 30000,
       });
       console.log('  ✅  MongoDB Atlas connected.');
+      dbReady = true;
       return;
     } catch (err) {
-      console.error(`  ❌  MongoDB connect attempt ${attempt}/5 failed: ${err.message}`);
-      if (attempt < 5) {
-        console.log('  ⏳  Retrying in 5 seconds...');
-        await new Promise(r => setTimeout(r, 5000));
-      } else {
-        console.error('  ❌  All MongoDB connection attempts failed. Exiting.');
-        process.exit(1);
-      }
+      console.error(`  ❌  MongoDB attempt ${attempt}/10: ${err.message}`);
+      await new Promise(r => setTimeout(r, 5000));
     }
   }
+  console.error('  ❌  Could not connect to MongoDB after 10 attempts.');
 }
-
-connectDB();
 
 // ==========================================
 // MONGOOSE SCHEMAS & MODELS
@@ -184,12 +180,21 @@ app.use(express.urlencoded({ extended: true }));
 
 const APP_SECRET_KEY = process.env.APP_SECRET_KEY || 'attendance-system-v2-secure-key-2026';
 
+// App secret check
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
     const clientKey = req.headers['x-app-secret'];
     if (clientKey !== APP_SECRET_KEY) {
       return res.status(403).json({ success: false, error: 'Access Denied: Unofficial Client.' });
     }
+  }
+  next();
+});
+
+// DB ready guard — return 503 if MongoDB not yet connected
+app.use('/api', (req, res, next) => {
+  if (!dbReady) {
+    return res.status(503).json({ success: false, error: 'Server starting up, please retry in a few seconds.' });
   }
   next();
 });
@@ -830,7 +835,7 @@ function escapeHtml(text) {
 // ==========================================
 // START SERVER
 // ==========================================
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, '0.0.0.0', () => {
   const ip = getLocalIP();
   console.log('');
   console.log('  ╔════════════════════════════════════════════╗');
@@ -849,16 +854,19 @@ app.listen(PORT, '0.0.0.0', async () => {
     process.env.RENDER_EXTERNAL_URL = 'https://attendance-server-ddgs.onrender.com';
   }
 
-  // Auto-close sessions exceeding 10 minutes
-  setInterval(async () => {
-    const nowMs = Date.now();
-    const expiredSessions = await Session.find({ active: true });
-    for (const s of expiredSessions) {
-      if (nowMs - s.sessionId > 10 * 60 * 1000) {
-        s.active = false;
-        s.stoppedAt = new Date(s.sessionId + 10 * 60 * 1000);
-        await s.save();
+  // Connect to MongoDB in background (HTTP server already running)
+  connectDB().then(() => {
+    // Auto-close sessions exceeding 10 minutes
+    setInterval(async () => {
+      const nowMs = Date.now();
+      const expiredSessions = await Session.find({ active: true });
+      for (const s of expiredSessions) {
+        if (nowMs - s.sessionId > 10 * 60 * 1000) {
+          s.active = false;
+          s.stoppedAt = new Date(s.sessionId + 10 * 60 * 1000);
+          await s.save();
+        }
       }
-    }
-  }, 10000);
+    }, 10000);
+  });
 });
