@@ -5,7 +5,7 @@ REST API backend for the NIT Jamshedpur QR Attendance System. Handles authentica
 **Live:** [attendance-server-ddgs.onrender.com](https://attendance-server-ddgs.onrender.com)
 
 ### 📥 Download the Mobile App
-👉 [Download Android APK (v2.2.0)](https://expo.dev/accounts/ignisight/projects/attendance-system/builds/9fdb1955-5354-49db-82e9-357b0e3b64b0)
+👉 [Download Android APK (v2.2.0)](https://expo.dev/accounts/ignisight/projects/attendance-system/builds/0df16407-f7c2-4868-9ba9-b133e152bf0b)
 
 ---
 
