@@ -206,16 +206,17 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const APP_SECRET_KEY = process.env.APP_SECRET_KEY;
+const LEGACY_APP_SECRET = process.env.LEGACY_APP_SECRET || '';  // old key — remove after all users update APK
 if (!APP_SECRET_KEY) {
   console.error('❌  APP_SECRET_KEY environment variable is not set.');
   process.exit(1);
 }
 
-// App secret check
+// App secret check (accepts both new key and legacy key during transition)
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) {
     const clientKey = req.headers['x-app-secret'];
-    if (clientKey !== APP_SECRET_KEY) {
+    if (clientKey !== APP_SECRET_KEY && clientKey !== LEGACY_APP_SECRET) {
       return res.status(403).json({ success: false, error: 'Access Denied: Unofficial Client.' });
     }
   }
