@@ -123,8 +123,11 @@ const Teacher = mongoose.model('Teacher', TeacherSchema);
 // OTP store (auto-deletes via MongoDB TTL)
 const OTPSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true },
-  otp: { type: String, required: true },
-  expiresAt: { type: Date, required: true, index: { expires: 0 } }, // TTL: deletes when expiresAt passes
+  otpHash: { type: String, required: true },              // bcrypt-hashed OTP — NEVER stored as plaintext
+  expiresAt: { type: Date, required: true, index: { expires: 0 } }, // TTL: MongoDB auto-deletes expired docs
+  failedAttempts: { type: Number, default: 0 },                  // Rate limiting: max 5 failed tries
+  lockedUntil: { type: Date, default: null },                 // Lockout timestamp after too many failures
+  lastRequestedAt: { type: Date, default: null },                 // Cooldown: 60s between OTP requests
 });
 const OTP = mongoose.model('OTP', OTPSchema);
 
@@ -268,6 +271,8 @@ app.post('/api/update-profile', async (req, res) => {
   });
 });
 
+// ---- SECURE OTP PASSWORD RESET ----
+
 app.post('/api/forgot-password', async (req, res) => {
   const { email } = req.body;
   if (!email) return res.json({ success: false, error: 'Email is required' });
@@ -276,14 +281,32 @@ app.post('/api/forgot-password', async (req, res) => {
   const user = await Teacher.findOne({ email: emailLower });
   if (!user) return res.json({ success: false, error: 'No account found with this email' });
 
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  // ── COOLDOWN: 60 seconds between OTP requests ──
+  const existingOtp = await OTP.findOne({ email: emailLower });
+  if (existingOtp && existingOtp.lastRequestedAt) {
+    const elapsed = Date.now() - existingOtp.lastRequestedAt.getTime();
+    if (elapsed < 60 * 1000) {
+      const wait = Math.ceil((60 * 1000 - elapsed) / 1000);
+      return res.json({ success: false, error: `Please wait ${wait} seconds before requesting a new OTP.` });
+    }
+  }
+
+  // ── GENERATE OTP using crypto (NOT Math.random) ──
+  const otp = crypto.randomInt(100000, 999999).toString();
+
+  // ── HASH OTP before storing (NEVER store plaintext) ──
+  const otpHash = await bcrypt.hash(otp, 10);
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-  // Upsert OTP (replace if exists)
-  await OTP.findOneAndUpdate({ email: emailLower }, { otp, expiresAt }, { upsert: true, new: true });
+  await OTP.findOneAndUpdate(
+    { email: emailLower },
+    { otpHash, expiresAt, failedAttempts: 0, lockedUntil: null, lastRequestedAt: new Date() },
+    { upsert: true, new: true }
+  );
 
+  // ── SEND OTP via email ONLY — never log or expose ──
   if (!EMAIL_USER || !EMAIL_PASS) {
-    console.log(`\n  🔑 OTP for ${emailLower}: ${otp}\n`);
+    console.log('  ⚠️  Email not configured. OTP generated but NOT exposed.');
     return res.json({ success: false, error: 'Email service not configured on server. Contact Admin.' });
   }
 
@@ -291,19 +314,21 @@ app.post('/api/forgot-password', async (req, res) => {
     from: `"Attendance System" <${EMAIL_USER}>`,
     to: emailLower,
     subject: 'Password Reset OTP - Attendance App',
-    html: `<div style="font-family:sans-serif;padding:20px;">
-             <h2>Password Reset Request</h2>
-             <p>Your OTP is:</p>
-             <h1 style="color:#4f46e5;letter-spacing:5px;">${otp}</h1>
-             <p>It expires in 10 minutes.</p>
+    html: `<div style="font-family:sans-serif;padding:20px;background:#0f172a;color:#f1f5f9;border-radius:12px;">
+             <h2 style="color:#818cf8;">Password Reset Request</h2>
+             <p>Your one-time verification code is:</p>
+             <h1 style="color:#6366f1;letter-spacing:8px;font-size:36px;background:#1e293b;display:inline-block;padding:12px 24px;border-radius:12px;">${otp}</h1>
+             <p style="margin-top:16px;">This code expires in <strong>10 minutes</strong>.</p>
+             <p style="color:#94a3b8;font-size:12px;margin-top:20px;">If you did not request this, ignore this email. Do NOT share this code with anyone.</p>
            </div>`,
   };
 
-  transporter.sendMail(mailOptions, (error, info) => {
+  transporter.sendMail(mailOptions, (error) => {
     if (error) {
-      console.error('Error sending email:', error);
+      console.error('Email send error:', error.message);
       return res.json({ success: false, error: 'Failed to send OTP email. Try again later.' });
     }
+    // ── RESPONSE: success message ONLY — no OTP, no hints ──
     res.json({ success: true, message: `OTP sent to ${emailLower}` });
   });
 });
@@ -314,20 +339,45 @@ app.post('/api/reset-password', async (req, res) => {
     return res.json({ success: false, error: 'Email, OTP and new password are required' });
 
   const emailLower = email.toLowerCase().trim();
-  const otpEntry = await OTP.findOne({ email: emailLower, otp });
-  if (!otpEntry) return res.json({ success: false, error: 'Invalid OTP' });
+  const otpEntry = await OTP.findOne({ email: emailLower });
+  if (!otpEntry) return res.json({ success: false, error: 'Invalid or expired OTP.' });
 
+  // ── RATE LIMIT: check if locked out ──
+  if (otpEntry.lockedUntil && Date.now() < otpEntry.lockedUntil.getTime()) {
+    const mins = Math.ceil((otpEntry.lockedUntil.getTime() - Date.now()) / 60000);
+    return res.json({ success: false, error: `Too many failed attempts. Try again in ${mins} minute(s).` });
+  }
+
+  // ── EXPIRY CHECK ──
   if (Date.now() > otpEntry.expiresAt.getTime()) {
     await OTP.deleteOne({ email: emailLower });
     return res.json({ success: false, error: 'OTP has expired. Request a new one.' });
   }
 
+  // ── VERIFY OTP via bcrypt.compare (secure) ──
+  const otpValid = await bcrypt.compare(otp, otpEntry.otpHash);
+  if (!otpValid) {
+    // Increment failed attempts
+    otpEntry.failedAttempts += 1;
+    if (otpEntry.failedAttempts >= 5) {
+      // Lock for 15 minutes after 5 fails
+      otpEntry.lockedUntil = new Date(Date.now() + 15 * 60 * 1000);
+      otpEntry.failedAttempts = 0;
+      await otpEntry.save();
+      return res.json({ success: false, error: 'Too many incorrect attempts. Locked for 15 minutes.' });
+    }
+    await otpEntry.save();
+    return res.json({ success: false, error: `Invalid OTP. ${5 - otpEntry.failedAttempts} attempt(s) remaining.` });
+  }
+
+  // ── PASSWORD VALIDATION ──
   if (newPassword.length < 4)
     return res.json({ success: false, error: 'Password must be at least 4 characters' });
 
   const user = await Teacher.findOne({ email: emailLower });
   if (!user) return res.json({ success: false, error: 'User not found' });
 
+  // ── UPDATE PASSWORD & DESTROY OTP ──
   user.password = await bcrypt.hash(newPassword, 10);
   await user.save();
   await OTP.deleteOne({ email: emailLower });
