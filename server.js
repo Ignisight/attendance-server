@@ -25,25 +25,31 @@ const PORT = process.env.PORT || 3000;
 // ==========================================
 const ALLOWED_EMAIL_DOMAIN = 'nitjsr.ac.in';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '188263362905-05e73in41h1ib970spt6q3meoidg2fte.apps.googleusercontent.com';
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const EMAIL_FROM = process.env.EMAIL_FROM || 'Attendance System <onboarding@resend.dev>';
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
+const EMAIL_FROM = process.env.EMAIL_FROM || 'work.anuragkishan@gmail.com';
+const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || 'Attendance System';
 
-// Send email via Resend HTTP API (works on Render free tier — no SMTP needed)
+// Send email via Brevo HTTP API (works on Render free tier — no SMTP needed, 300 emails/day free)
 async function sendEmail(to, subject, html) {
-  if (!RESEND_API_KEY) {
-    console.log('  ⚠️  RESEND_API_KEY not configured. Email not sent.');
+  if (!BREVO_API_KEY) {
+    console.log('  ⚠️  BREVO_API_KEY not configured. Email not sent.');
     return { success: false, error: 'Email service not configured. Contact Admin.' };
   }
   try {
-    const res = await fetch('https://api.resend.com/emails', {
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from: EMAIL_FROM, to: [to], subject, html }),
+      headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sender: { name: EMAIL_FROM_NAME, email: EMAIL_FROM },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+      }),
     });
     const data = await res.json();
     if (res.ok) return { success: true };
     if (res.status === 429) return { success: false, error: 'Daily email limit reached. Please try again tomorrow.' };
-    console.error('Resend API error:', data);
+    console.error('Brevo API error:', data);
     return { success: false, error: data.message || 'Email send failed.' };
   } catch (err) {
     console.error('Email send error:', err.message);
